@@ -1,0 +1,67 @@
+name: Bug report
+description: 报告脚本功能异常、页面适配问题或答题失败
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提交前请先确认已经使用最新 Release。请不要在 issue 中粘贴 API Key、Cookie、课程账号等敏感信息。
+  - type: input
+    id: version
+    attributes:
+      label: 脚本版本
+      description: 可在脚本管理器或 Release 文件头部查看。
+      placeholder: v1.0.0
+    validations:
+      required: true
+  - type: dropdown
+    id: manager
+    attributes:
+      label: 脚本管理器
+      options:
+        - Tampermonkey
+        - Violentmonkey
+        - 脚本猫
+        - 其他
+    validations:
+      required: true
+  - type: dropdown
+    id: page
+    attributes:
+      label: 出问题的页面
+      options:
+        - 首页/设置
+        - 网课/任务点
+        - 作业/考试
+        - 手动搜题
+        - 其他
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述
+      description: 说明发生了什么，以及你期望它如何工作。
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 打开...
+        2. 点击...
+        3. 看到...
+  - type: textarea
+    id: logs
+    attributes:
+      label: 控制台错误或截图
+      description: 可粘贴浏览器控制台错误。请先打码课程、姓名、账号、API Key。
+  - type: textarea
+    id: ai
+    attributes:
+      label: AI 配置摘要
+      description: 只写接口类型、模型名、是否开启图片识别等，不要提交 API Key。
+      placeholder: OpenAI 兼容接口 / gpt-4.1-mini / 自动图片识别

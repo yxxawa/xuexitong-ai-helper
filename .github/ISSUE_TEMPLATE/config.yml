@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 最新 Release
+    url: https://github.com/yxxawa/xuexitong-ai-helper/releases/latest
+    about: 下载最新脚本文件。
+  - name: 使用说明
+    url: https://github.com/yxxawa/xuexitong-ai-helper#安装使用
+    about: 查看 README 中的安装和配置说明。

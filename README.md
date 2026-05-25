@@ -6,6 +6,7 @@
   <p>
     <strong>学习通 AI 辅助插件</strong><br>
     自定义 AI 接口 · 自动答题 · 手动搜题 · 网课挂机
+  </p>
 
   <p>
     <a href="https://github.com/yxxawa/xuexitong-ai-helper/releases">
@@ -57,6 +58,13 @@ pnpm dev
 - `xuexitong-ai-helper.dev.user.js`
 - `xuexitong-ai-helper.common.user.js`
 
+## 项目文档
+
+- [贡献指南](CONTRIBUTING.md)：开发、提交 issue/PR 和发布流程。
+- [安全说明](SECURITY.md)：API Key、Cookie、课程信息等敏感内容处理方式。
+- [更新日志](CHANGELOG.md)：版本变化记录。
+- [许可和来源说明](NOTICE.md)：OCS 和 easy-us 的来源与许可说明。
+
 ## 仓库结构
 
 - `packages/core`：工作器、题目处理、通用工具。
@@ -65,13 +73,19 @@ pnpm dev
 - `vendor/easy-us`：随仓库保留的补丁版 UI 依赖，用于保持当前悬浮窗口行为。
 - `scripts`：本地开发和构建脚本。
 
+## Vendored 依赖
+
+`vendor/easy-us` 来自 easy-us 项目，按 MIT License 随仓库保留。本项目依赖其中经过调整的悬浮窗口行为，因此没有直接使用 npm 安装的原版包。相关来源和许可见 [NOTICE.md](NOTICE.md)。
+
 ## 界面预览
 
 ![作业考试界面](docs/assets/screenshot-work.png)
 
 ## 注意
 
-本项目仅用于学习、研究和技术交流。使用时请遵守学校、课程和平台规则。AI 输出可能存在错误，提交前应自行核对结果。
+本项目仅用于学习、研究和技术交流。使用时请遵守学校、课程和平台规则，不建议用于违反课程要求或平台规则的场景。
+
+AI 输出可能存在错误，提交前应自行核对结果。反馈问题时请勿公开 API Key、Cookie、账号、课程个人信息或未打码的敏感截图。
 
 ## 致谢
 

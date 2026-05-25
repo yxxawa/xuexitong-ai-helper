@@ -1,0 +1,48 @@
+name: AI provider issue
+description: 反馈 AI 接口、模型列表、返回格式或图片输入相关问题
+title: "[AI] "
+labels:
+  - ai-provider
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请不要提交 API Key。URL 中如果包含 token、签名或个人信息，也请先打码。
+  - type: input
+    id: provider
+    attributes:
+      label: 接口类型/服务商
+      placeholder: OpenAI compatible / Anthropic / DeepSeek / 自建代理
+    validations:
+      required: true
+  - type: input
+    id: base_url
+    attributes:
+      label: API 地址
+      description: 可打码域名或路径中的敏感部分。
+      placeholder: https://api.example.com/v1
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: 模型名
+      placeholder: gpt-4.1-mini
+    validations:
+      required: true
+  - type: dropdown
+    id: image
+    attributes:
+      label: 图片识别设置
+      options:
+        - 自动
+        - 支持
+        - 不支持
+        - 未使用图片题
+  - type: textarea
+    id: raw
+    attributes:
+      label: 原始输出/错误信息
+      description: 可从脚本的原始输出窗口复制。请先删除密钥和个人信息。
+    validations:
+      required: true

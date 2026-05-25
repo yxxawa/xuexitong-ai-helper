@@ -58,7 +58,8 @@ const state = {
 		videojs: Object.create({}),
 		hacked: false,
 		playbackRateWarningListenerId: 0
-	}
+	},
+	secretFontRecognizeTasks: new WeakMap<Document, Promise<boolean>>()
 };
 
 type VideoQuizStrategy = 'random' | 'ignore';
@@ -812,6 +813,9 @@ function workOrExam(
 		requestPeriod: Math.max(0, Number(period || 0) * 1000),
 		answerSeparators: answerSeparators.split(',').map((s) => s.trim()),
 		answerMatchMode: answerMatchMode,
+		async onElementSearched(elements, root) {
+			await recognizeSecretFontForQuestion(root);
+		},
 		/** 默认搜题方法构造器 */
 		answerer: (elements, ctx) => {
 			if (elements.title) {
@@ -1054,9 +1058,34 @@ async function mappingRecognize(doc: Document = document) {
 			});
 
 			console.log('识别繁体字完成。');
+			return fonts.length > 0;
 		} else {
 			console.log('未检测到繁体字。');
 		}
+	}
+	return false;
+}
+
+async function recognizeSecretFontForQuestion(root: HTMLElement) {
+	const doc = root.ownerDocument || document;
+	if (!CXAnalyses.getSecretFont(doc).length) {
+		return false;
+	}
+
+	try {
+		const running = state.secretFontRecognizeTasks.get(doc);
+		if (running) {
+			return await running;
+		}
+
+		const task = mappingRecognize(doc);
+		state.secretFontRecognizeTasks.set(doc, task);
+		return await task;
+	} catch (err) {
+		console.error('题目字体识别失败，将使用页面原始文本传给 AI：', String(err));
+		return false;
+	} finally {
+		state.secretFontRecognizeTasks.delete(doc);
 	}
 }
 
@@ -2035,7 +2064,9 @@ const JobRunner = {
 					}
 				}
 			},
-			async onElementSearched(elements) {
+			async onElementSearched(elements, root) {
+				await recognizeSecretFontForQuestion(root);
+
 				const typeInput = elements.type[0] as HTMLInputElement;
 				const type = typeInput ? getQuestionType(parseInt(typeInput.value)) : undefined;
 

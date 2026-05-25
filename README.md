@@ -1,32 +1,29 @@
-<p align="center">
-  <img src="docs/assets/icon.svg" width="104" alt="Xuexitong AI Helper Icon">
-</p>
+<div align="center">
+  <img src="docs/assets/icon.svg" width="88" alt="Xuexitong AI Helper Icon">
 
-<h1 align="center">XUEXITONG AI HELPER</h1>
+  <h1>XUEXITONG AI HELPER</h1>
 
-<p align="center">
-  学习通 AI 辅助插件：支持自定义 AI 接口、自动答题、手动搜题和章节学习辅助。
-</p>
+  <p>
+    <strong>学习通 AI 辅助插件</strong><br>
+    自定义 AI 接口 · 自动答题 · 手动搜题 · 章节学习辅助
+  </p>
 
-<p align="center">
-  <a href="https://github.com/yxxawa/xuexitong-ai-helper/releases">
-    <img src="https://img.shields.io/github/v/release/yxxawa/xuexitong-ai-helper?label=release" alt="Release">
-  </a>
-  <a href="./LICENSE">
-    <img src="https://img.shields.io/github/license/yxxawa/xuexitong-ai-helper" alt="License">
-  </a>
-  <a href="https://github.com/yxxawa/xuexitong-ai-helper/stargazers">
-    <img src="https://img.shields.io/github/stars/yxxawa/xuexitong-ai-helper?style=flat" alt="Stars">
-  </a>
-</p>
+  <p>
+    <a href="https://github.com/yxxawa/xuexitong-ai-helper/releases">
+      <img src="https://img.shields.io/github/v/release/yxxawa/xuexitong-ai-helper?label=release" alt="Release">
+    </a>
+    <a href="./LICENSE">
+      <img src="https://img.shields.io/github/license/yxxawa/xuexitong-ai-helper" alt="License">
+    </a>
+    <a href="https://github.com/yxxawa/xuexitong-ai-helper/stargazers">
+      <img src="https://img.shields.io/github/stars/yxxawa/xuexitong-ai-helper?style=flat" alt="Stars">
+    </a>
+  </p>
+</div>
 
 ## 界面预览 🖼️
 
 ![作业考试界面](docs/assets/screenshot-work.png)
-
-## Star 趋势 ⭐
-
-[![Star History Chart](https://api.star-history.com/svg?repos=yxxawa/xuexitong-ai-helper&type=Date)](https://www.star-history.com/#yxxawa/xuexitong-ai-helper&Date)
 
 ## 主要功能 ✨
 
@@ -80,3 +77,11 @@ pnpm dev
 ## 致谢 🙏
 
 本项目基于 OCS 和 easy-us 修改整理，遵循 MIT License。详细说明见 `NOTICE.md` 和 `LICENSE`。
+
+## Star 趋势 ⭐
+
+<p align="center">
+  <a href="https://www.star-history.com/#yxxawa/xuexitong-ai-helper&Date">
+    <img src="https://api.star-history.com/svg?repos=yxxawa/xuexitong-ai-helper&type=Date" width="520" alt="Star History Chart">
+  </a>
+</p>

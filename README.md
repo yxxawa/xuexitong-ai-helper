@@ -77,10 +77,6 @@ pnpm dev
 
 `vendor/easy-us` 来自 easy-us 项目，按 MIT License 随仓库保留。本项目依赖其中经过调整的悬浮窗口行为，因此没有直接使用 npm 安装的原版包。相关来源和许可见 [NOTICE.md](NOTICE.md)。
 
-## 界面预览
-
-![作业考试界面](docs/assets/screenshot-work.png)
-
 ## 注意
 
 本项目仅用于学习、研究和技术交流。使用时请遵守学校、课程和平台规则，不建议用于违反课程要求或平台规则的场景。

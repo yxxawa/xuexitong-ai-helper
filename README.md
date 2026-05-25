@@ -2,7 +2,22 @@
 
 学习通 AI 辅助插件是一个油猴/脚本猫用户脚本，面向学习通页面，支持自定义 AI 接口、自动答题、手动搜题和章节学习辅助。
 
-## 功能
+[![Release](https://img.shields.io/github/v/release/yxxawa/xuexitong-ai-helper?label=release)](https://github.com/yxxawa/xuexitong-ai-helper/releases)
+[![License](https://img.shields.io/github/license/yxxawa/xuexitong-ai-helper)](./LICENSE)
+
+## 界面预览
+
+![首页](docs/assets/screenshot-home.png)
+
+| AI 设置 | 作业考试 |
+| --- | --- |
+| ![AI 设置](docs/assets/screenshot-ai-settings.png) | ![作业考试](docs/assets/screenshot-work-results.png) |
+
+| 手动搜题 |
+| --- |
+| ![手动搜题](docs/assets/screenshot-manual-search.png) |
+
+## 主要功能
 
 - AI 设置：支持 OpenAI 兼容接口、Anthropic 接口、模型列表获取、温度、最大输出和 JSON 输出限制。
 - 作业考试：支持单选、多选、判断、填空等题型，题目图片会以 base64 方式传给支持视觉的模型。
@@ -13,7 +28,7 @@
 ## 安装使用
 
 1. 安装 Tampermonkey、Violentmonkey 或脚本猫。
-2. 执行构建后，将 `dist/xuexitong-ai-helper.common.user.js` 导入脚本管理器。
+2. 从 [Releases](https://github.com/yxxawa/xuexitong-ai-helper/releases) 下载 `xuexitong-ai-helper.common.user.js`，导入脚本管理器。
 3. 打开学习通页面，在悬浮窗口的“AI设置”中填写接口地址、API Key 和模型。
 4. 进入作业、考试或章节测试页面后使用自动答题；也可以在“手动搜题”中单独调用 AI。
 

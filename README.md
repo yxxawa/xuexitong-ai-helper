@@ -5,8 +5,7 @@
 
   <p>
     <strong>学习通 AI 辅助插件</strong><br>
-    自定义 AI 接口 · 自动答题 · 手动搜题 · 章节学习辅助
-  </p>
+    自定义 AI 接口 · 自动答题 · 手动搜题 · 网课挂机
 
   <p>
     <a href="https://github.com/yxxawa/xuexitong-ai-helper/releases">

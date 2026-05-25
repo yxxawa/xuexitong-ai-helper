@@ -7,15 +7,7 @@
 
 ## 界面预览
 
-![首页](docs/assets/screenshot-home.png)
-
-| AI 设置 | 作业考试 |
-| --- | --- |
-| ![AI 设置](docs/assets/screenshot-ai-settings.png) | ![作业考试](docs/assets/screenshot-work-results.png) |
-
-| 手动搜题 |
-| --- |
-| ![手动搜题](docs/assets/screenshot-manual-search.png) |
+![作业考试界面](docs/assets/screenshot-work.png)
 
 ## 主要功能
 

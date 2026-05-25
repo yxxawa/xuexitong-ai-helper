@@ -1012,6 +1012,17 @@ container-element.minimize header-element .close {
 	color: #374151;
 	font-weight: bold;
 }
+.cx-ai-home .home-github-link {
+	display: block;
+	width: fit-content;
+	margin: 12px 0 0 auto;
+	color: #1677ff;
+	font-size: 12px;
+	text-decoration: none;
+}
+.cx-ai-home .home-github-link:hover {
+	text-decoration: underline;
+}
 @media (max-width: 560px) {
 	.cx-ai-home .home-grid {
 		grid-template-columns: 1fr;

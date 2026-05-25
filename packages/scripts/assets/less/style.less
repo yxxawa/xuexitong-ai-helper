@@ -819,6 +819,102 @@ container-element.minimize header-element {
 	}
 }
 
+.cx-ai-home {
+	.home-hero {
+		background: #f8fbff;
+		border: 1px solid #d8e8f8;
+		border-radius: 6px;
+		padding: 14px;
+	}
+
+	.home-title {
+		color: #1f2937;
+		font-size: 20px;
+		font-weight: bold;
+		line-height: 28px;
+	}
+
+	.home-subtitle {
+		color: #4b5563;
+		margin-top: 4px;
+	}
+
+	.home-status {
+		background: #fff7ed;
+		border: 1px solid #fed7aa;
+		border-radius: 4px;
+		color: #9a3412;
+		margin-top: 10px;
+		padding: 6px 8px;
+
+		&.ready {
+			background: #ecfdf5;
+			border-color: #bbf7d0;
+			color: #166534;
+		}
+	}
+
+	.home-actions,
+	.home-footer {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 8px;
+		margin-top: 12px;
+
+		button {
+			margin: 0;
+		}
+	}
+
+	.home-grid {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 10px;
+		margin-top: 10px;
+	}
+
+	.home-panel {
+		border: 1px solid #e5e7eb;
+		border-radius: 6px;
+		padding: 10px;
+	}
+
+	.home-panel-title {
+		color: #111827;
+		font-weight: bold;
+		margin-bottom: 6px;
+	}
+
+	.home-step + .home-step,
+	.home-feature + .home-feature {
+		margin-top: 8px;
+	}
+
+	.home-step-title {
+		color: #374151;
+		font-weight: bold;
+	}
+
+	.home-github-link {
+		display: block;
+		width: fit-content;
+		margin: 12px 0 0 auto;
+		color: #1677ff;
+		font-size: 12px;
+		text-decoration: none;
+
+		&:hover {
+			text-decoration: underline;
+		}
+	}
+}
+
+@media (max-width: 560px) {
+	.cx-ai-home .home-grid {
+		grid-template-columns: 1fr;
+	}
+}
+
 .search-infos-num {
 	width: 26px;
 	margin: 2px;

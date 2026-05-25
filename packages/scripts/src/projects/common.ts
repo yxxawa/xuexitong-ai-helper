@@ -1408,7 +1408,17 @@ const createGuide = () => {
 				feature('答案来源', '仅使用 AI'),
 				feature('支持题型', '单选、多选、判断、填空。多选和判断已做 AI 输出兼容。')
 			])
-		])
+		]),
+		h(
+			'a',
+			{
+				className: 'home-github-link',
+				href: 'https://github.com/yxxawa/xuexitong-ai-helper',
+				target: '_blank',
+				rel: 'noopener noreferrer'
+			},
+			'Github仓库'
+		)
 	]);
 };
 

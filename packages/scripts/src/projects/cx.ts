@@ -992,19 +992,16 @@ function workOrExam(
 async function mappingRecognize(doc: Document = document) {
 	let typrMapping = Object.create({});
 	try {
-		// @ts-ignore
-		top.typrMapping = top.typrMapping || (await loadTyprMapping());
-		// @ts-ignore
-		typrMapping = top.typrMapping;
+		const topWindow = top as any;
+		topWindow.typrMapping =
+			topWindow.typrMapping && Object.keys(topWindow.typrMapping).length > 0
+				? topWindow.typrMapping
+				: await loadTyprMapping();
+		typrMapping = topWindow.typrMapping;
 	} catch {
 		// 超星考试可能嵌套其他平台中，所以会存在跨域，这里需要处理一下跨域情况，如果是跨域直接在当前页面加载字库
 		typrMapping = await loadTyprMapping();
 	}
-
-	/** 判断是否有繁体字 */
-	const fontFaceEl = Array.from(doc.head.querySelectorAll('style')).find((style) =>
-		style.textContent?.includes('font-cxsecret')
-	);
 
 	const base64ToUint8Array = (base64: string) => {
 		const data = window.atob(base64);
@@ -1015,55 +1012,97 @@ async function mappingRecognize(doc: Document = document) {
 		return buffer;
 	};
 
+	const extractBase64Fonts = (styleText: string) => {
+		const fonts: string[] = [];
+		const regexp = /base64\s*,\s*([A-Za-z0-9+/=\s]+)/g;
+		let matched: RegExpExecArray | null;
+		while ((matched = regexp.exec(styleText)) !== null) {
+			const font = matched[1].replace(/\s/g, '');
+			if (font) {
+				fonts.push(font);
+			}
+		}
+		return fonts;
+	};
+
+	const normalizeMappedCode = (value: unknown) => {
+		const code = Number(value);
+		return Number.isFinite(code) && code > 0 ? String.fromCodePoint(code) : '';
+	};
+
 	const fontMap = typrMapping;
-	if (fontFaceEl && Object.keys(fontMap).length > 0) {
-		// 解析font-cxsecret字体
-		const font = fontFaceEl.textContent?.match(/base64,([\w\W]+?)'/)?.[1];
+	const secretFonts = CXAnalyses.getSecretFont(doc);
+	if (secretFonts.length === 0 || Object.keys(fontMap).length === 0) {
+		return false;
+	}
 
-		if (font) {
-			console.log('正在识别繁体字');
+	/** 判断是否有繁体字 */
+	const fontFaceEls = Array.from(doc.querySelectorAll('style')).filter((style) =>
+		style.textContent?.includes('font-cxsecret')
+	);
+	const base64Fonts = fontFaceEls.flatMap((style) => extractBase64Fonts(style.textContent || ''));
 
+	if (base64Fonts.length === 0) {
+		console.log('未检测到学习通加密字体。');
+		return false;
+	}
+
+	console.log('正在识别学习通加密字体');
+
+	const encryptedChars = Array.from(
+		new Set(
+			Array.from(secretFonts.map((el) => el.textContent || '').join('')).filter((char) => {
+				const code = char.codePointAt(0) || 0;
+				return code > 127 && !/\s/.test(char);
+			})
+		)
+	);
+
+	const match: Record<string, string> = {};
+	for (const font of base64Fonts) {
+		try {
 			const code = Typr.parse(base64ToUint8Array(font));
-
-			// 匹配解密字体
-			const match: any = {};
-			for (let i = 19968; i < 40870; i++) {
-				// 中文[19968, 40869]
-				const Glyph = Typr.U.codeToGlyph(code, i);
+			for (const word of encryptedChars) {
+				if (match[word]) {
+					continue;
+				}
+				const codePoint = word.codePointAt(0);
+				if (!codePoint) {
+					continue;
+				}
+				const Glyph = Typr.U.codeToGlyph(code, codePoint);
 				if (!Glyph) continue;
 				const path = Typr.U.glyphToPath(code, Glyph);
 				const hex = md5(JSON.stringify(path)).slice(24); // 8位即可区分
-				match[i.toString()] = fontMap[hex];
-			}
-			const fonts = CXAnalyses.getSecretFont(doc);
-			// 替换加密字体
-			fonts.forEach((el, index) => {
-				let html = el.innerHTML;
-				for (const key in match) {
-					const word = String.fromCharCode(parseInt(key));
-					const value = String.fromCharCode(match[key]);
-
-					// 如果相同，则不需要替换
-					if (word === value) {
-						continue;
-					}
-
-					while (html.indexOf(word) !== -1) {
-						html = html.replace(word, value);
-					}
+				const value = normalizeMappedCode(fontMap[hex]);
+				if (value && word !== value) {
+					match[word] = value;
 				}
-
-				el.innerHTML = html;
-				el.classList.remove('font-cxsecret'); // 移除字体加密
-			});
-
-			console.log('识别繁体字完成。');
-			return fonts.length > 0;
-		} else {
-			console.log('未检测到繁体字。');
+			}
+		} catch (err) {
+			console.warn('解析学习通加密字体失败，继续尝试其他字体：', String(err));
 		}
 	}
-	return false;
+
+	const mappedChars = Object.keys(match);
+	if (mappedChars.length === 0) {
+		console.warn('未能匹配学习通加密字体字形，题目可能仍会显示异常字符。');
+		return false;
+	}
+
+	// 替换加密字体
+	secretFonts.forEach((el) => {
+		let html = el.innerHTML;
+		for (const word of mappedChars) {
+			html = html.split(word).join(match[word]);
+		}
+
+		el.innerHTML = html;
+		el.classList.remove('font-cxsecret'); // 移除字体加密
+	});
+
+	console.log(`学习通加密字体识别完成，已还原 ${mappedChars.length}/${encryptedChars.length} 个字符。`);
+	return secretFonts.length > 0;
 }
 
 async function recognizeSecretFontForQuestion(root: HTMLElement) {
@@ -1090,16 +1129,27 @@ async function recognizeSecretFontForQuestion(root: HTMLElement) {
 }
 
 async function loadTyprMapping() {
-	try {
-		console.log('正在加载繁体字库。');
-		return await request('https://cdn.xuexitong-ai-helper.com/resources/font/table.json', {
-			type: 'GM_xmlhttpRequest',
-			method: 'get',
-			responseType: 'json'
-		});
-	} catch (err) {
-		console.error('载繁体字库加载失败，请刷新页面重试：', String(err));
+	const urls = [
+		'https://cdn.xuexitong-ai-helper.com/resources/font/table.json',
+		'https://cdn.ocsjs.com/resources/font/table.json'
+	];
+	for (const url of urls) {
+		try {
+			console.log('正在加载繁体字库。');
+			const mapping = await request(url, {
+				type: 'GM_xmlhttpRequest',
+				method: 'get',
+				responseType: 'json'
+			});
+			if (mapping && Object.keys(mapping).length > 0) {
+				return mapping;
+			}
+		} catch (err) {
+			console.warn(`学习通加密字体库加载失败，准备尝试下一个源：${url}`, String(err));
+		}
 	}
+	console.error('学习通加密字体库加载失败，请刷新页面重试。');
+	return {};
 }
 
 /**

@@ -93,7 +93,7 @@ async function createUserJs() {
 				namespace: 'https://github.com/yxxawa/xuexitong-ai-helper',
 				homepage: 'https://github.com/yxxawa/xuexitong-ai-helper',
 				source: 'https://github.com/yxxawa/xuexitong-ai-helper',
-				icon: 'https://www.chaoxing.com/favicon.ico',
+				icon: 'https://raw.githubusercontent.com/yxxawa/xuexitong-ai-helper/main/docs/assets/icon.svg',
 				connect: ['*'],
 				match: matchDomains.map((domain) => `*://*.${domain}/*`),
 				grant: [

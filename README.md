@@ -1,11 +1,11 @@
 <div align="center">
   <img src="docs/assets/icon.svg" width="88" alt="Xuexitong AI Helper Icon">
 
-  <h1>XUEXITONG AI HELPER</h1>
+  <h1>学习通 AI 辅助插件</h1>
 
   <p>
-    <strong>学习通 AI 辅助插件</strong><br>
-    自定义 AI 接口 · 自动答题 · 手动搜题 · 网课挂机
+    <strong>面向学习通 / 超星的 AI助手、题目解析与油猴脚本 userscript</strong><br>
+    支持 DeepSeek、OpenAI、Anthropic 与 OpenAI 兼容接口，可用于 AI 设置、手动搜题、题目解析、作业/考试辅助和章节学习。
   </p>
 
   <p>
@@ -23,7 +23,7 @@
 
 ## 主要功能
 
-- AI 设置：支持 OpenAI 兼容接口、Anthropic 接口、模型列表获取、温度、最大输出和 JSON 输出限制。
+- AI 设置：支持 DeepSeek、OpenAI、Anthropic 和 OpenAI 兼容接口，支持模型列表获取、温度、最大输出和 JSON 输出限制。
 - 作业考试：支持单选、多选、判断、填空等题型，题目图片会以 base64 方式传给支持视觉的模型。
 - 手动搜题：输入题目或划词后调用 AI 搜索，并展示答案与原始输出。
 - 结果查看：作业/考试页面可查看每题题目、AI 答案、原始输出、请求/响应和 token 用量。

@@ -1,0 +1,28 @@
+<svg width="160" height="160" viewBox="0 0 160 160" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="20" y1="16" x2="142" y2="146" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#38BDF8"/>
+      <stop offset="0.55" stop-color="#1677FF"/>
+      <stop offset="1" stop-color="#22C55E"/>
+    </linearGradient>
+    <linearGradient id="card" x1="42" y1="38" x2="124" y2="124" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#EAF4FF"/>
+    </linearGradient>
+    <filter id="shadow" x="8" y="10" width="144" height="146" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="10" stdDeviation="8" flood-color="#0F172A" flood-opacity="0.18"/>
+    </filter>
+  </defs>
+  <rect x="18" y="16" width="124" height="128" rx="28" fill="url(#bg)" filter="url(#shadow)"/>
+  <path d="M42 56C42 46.0589 50.0589 38 60 38H100C109.941 38 118 46.0589 118 56V112C118 117.523 113.523 122 108 122H52C46.4772 122 42 117.523 42 112V56Z" fill="url(#card)"/>
+  <path d="M60 38H100C109.941 38 118 46.0589 118 56V58H42V56C42 46.0589 50.0589 38 60 38Z" fill="#DBEAFE"/>
+  <circle cx="61" cy="49" r="4" fill="#1677FF"/>
+  <circle cx="80" cy="49" r="4" fill="#22C55E"/>
+  <circle cx="99" cy="49" r="4" fill="#F59E0B"/>
+  <path d="M58 79H102" stroke="#93C5FD" stroke-width="7" stroke-linecap="round"/>
+  <path d="M58 98H84" stroke="#93C5FD" stroke-width="7" stroke-linecap="round"/>
+  <path d="M100 86L110 96L128 74" stroke="#22C55E" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M38 116C28 108 23 96 23 80C23 64 28 52 38 44" stroke="#E0F2FE" stroke-width="8" stroke-linecap="round"/>
+  <path d="M122 44C132 52 137 64 137 80C137 96 132 108 122 116" stroke="#DCFCE7" stroke-width="8" stroke-linecap="round"/>
+  <text x="80" y="142" text-anchor="middle" font-family="Arial, sans-serif" font-size="18" font-weight="700" fill="#FFFFFF">AI</text>
+</svg>

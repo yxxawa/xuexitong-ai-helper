@@ -1,0 +1,24 @@
+{
+	"compilerOptions": {
+		"target": "es6",
+		"module": "commonjs",
+		"outDir": "./lib",
+		"declaration": true,
+		"strict": true,
+		"esModuleInterop": true,
+		"skipLibCheck": true,
+		"forceConsistentCasingInFileNames": true,
+		"lib": ["DOM", "ES2020"],
+		"jsx": "preserve",
+		"resolveJsonModule": true,
+		"baseUrl": ".",
+		"paths": {
+			"@xuexitong-ai-helper/core": ["../core/src/index.ts"],
+			"@xuexitong-ai-helper/core/*": ["../core/*"],
+			"@xuexitong-ai-helper/utils": ["../utils/src/index.ts"],
+			"@xuexitong-ai-helper/utils/*": ["../utils/*"]
+		}
+	},
+	"include": ["./src/**/*.ts"],
+	"files": ["./global.d.ts"]
+}

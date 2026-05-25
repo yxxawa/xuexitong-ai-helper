@@ -1,0 +1,51 @@
+{
+	"name": "@xuexitong-ai-helper/scripts",
+	"version": "4.0.1",
+	"description": "学习通 AI 辅助插件的脚本入口与平台适配。",
+	"main": "./lib/index.js",
+	"types": "./lib/index.d.ts",
+	"files": [
+		"lib"
+	],
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/yxxawa/xuexitong-ai-helper.git"
+	},
+	"keywords": [
+		"xuexitong",
+		"chaoxing",
+		"ai",
+		"userscript",
+		"script",
+		"playwright",
+		"puppeteer",
+		"electron",
+		"vue",
+		"ant-design-vue",
+		"typescript"
+	],
+	"author": "enncy / modified",
+	"license": "MIT",
+	"bugs": {
+		"url": "https://github.com/yxxawa/xuexitong-ai-helper/issues"
+	},
+	"homepage": "https://github.com/yxxawa/xuexitong-ai-helper#readme",
+	"devDependencies": {
+		"@types/md5": "^2.3.2",
+		"@types/semver": "^7.5.0",
+		"@types/tampermonkey": "^4.0.5",
+		"dotenv": "^16.0.3",
+		"vite": "^2.9.15",
+		"vite-plugin-banner": "^0.6.1"
+	},
+	"dependencies": {
+		"@xuexitong-ai-helper/core": "workspace:*",
+		"@rollup/plugin-commonjs": "^24.0.0",
+		"browser-env": "^3.3.0",
+		"easy-us": "file:../../vendor/easy-us",
+		"lodash": "^4.17.21",
+		"md5": "^2.3.0",
+		"semver": "^7.3.5",
+		"typr.js": "^1.0.0"
+	}
+}

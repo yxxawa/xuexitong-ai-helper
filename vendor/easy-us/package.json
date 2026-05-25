@@ -1,0 +1,61 @@
+{
+	"name": "easy-us",
+	"version": "0.0.63",
+	"description": "easy user-script framework",
+	"main": "./lib/index.js",
+	"types": "./lib/index.d.ts",
+	"files": [
+		"lib",
+		"dist",
+		"assets"
+	],
+	"scripts": {
+		"build": "tsc && vite build",
+		"dev": "vite build -w",
+		"pub": "npm run build && npm version patch && npm publish && git push origin main --tags",
+		"init-commitizen": "commitizen init cz-conventional-changelog --save --save-exact"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/enncy/easy-us.git"
+	},
+	"keywords": [
+		"script",
+		"framework",
+		"user-script",
+		"typescript",
+		"tampermonkey",
+		"scriptcat"
+	],
+	"author": "enncy",
+	"license": "MIT",
+	"bugs": {
+		"url": "https://github.com/enncy/easy-us/issues"
+	},
+	"homepage": "https://github.com/enncy/easy-us#readme",
+	"devDependencies": {
+		"@types/event-emitter": "^0.3.3",
+		"@types/lodash": "^4.14.194",
+		"@types/string-similarity": "^4.0.0",
+		"@types/tampermonkey": "^4.0.5",
+		"commitizen": "^4.3.0",
+		"cz-conventional-changelog": "^3.3.0",
+		"dotenv": "^16.0.3",
+		"rollup-plugin-visualizer": "^5.9.0",
+		"typedoc": "^0.23.23",
+		"vite": "^2.9.15",
+		"vite-plugin-banner": "^0.6.1"
+	},
+	"dependencies": {
+		"@rollup/plugin-typescript": "^11.1.6",
+		"events": "^3.3.0",
+		"lodash": "^4.17.21",
+		"semver": "^7.3.5",
+		"string-similarity": "^4.0.4"
+	},
+	"config": {
+		"commitizen": {
+			"path": "./node_modules/cz-conventional-changelog"
+		}
+	}
+}

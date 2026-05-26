@@ -5,7 +5,7 @@
 
   <p>
     <strong>面向学习通 / 超星的 AI助手、题目解析与油猴脚本 userscript</strong><br>
-    支持 DeepSeek、OpenAI、Anthropic 与 OpenAI 兼容接口，可用于 AI 设置、手动搜题、题目解析、作业/考试辅助和章节学习。
+    支持 OpenAI 与 Anthropic 兼容接口，可用于 AI 设置、手动搜题、题目解析、作业/考试辅助和章节学习。
   </p>
 
   <p>

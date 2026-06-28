@@ -19,7 +19,9 @@
       <img src="https://img.shields.io/github/stars/yxxawa/xuexitong-ai-helper?style=flat" alt="Stars">
     </a>
   </p>
-</div>
+</div>    
+<img width="2559" height="1401" alt="image" src="https://github.com/user-attachments/assets/af81c110-0dd1-4270-9908-be1cdff018e7" />
+
 
 ## 主要功能
 

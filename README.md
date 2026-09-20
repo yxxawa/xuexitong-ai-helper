@@ -60,66 +60,12 @@
 - 2026-09-20 已使用临时登录会话实测原生图片上传、一次发送及 JSON 答案读取。仍是 DOM 实验适配，网页改版、账号额度或风控可能使其失效；自动化回归使用本地模拟网页。更新脚本后请刷新旧专用标签页并重新启用。
 - [实现、参考资料与扩展其他 AI 的方式](docs/deepseek-web.md)。
 
-## 开发构建
-
-需要 Node.js 和 pnpm。
-
-```bash
-pnpm install
-pnpm build
-```
-
-常用命令：
-
-```bash
-pnpm typecheck
-pnpm test
-pnpm dev
-```
-
-构建产物默认输出到 `dist/`：
-
-- `xuexitong-ai-helper.user.js`
-- `xuexitong-ai-helper.dev.user.js`
-- `xuexitong-ai-helper.common.user.js`
-
-浏览器回归测试（模拟学习通页面、AI 接口和跨页 DeepSeek 接收端，不使用真实账号或 API Key）：
-
-```bash
-pnpm build
-pnpm test:browser
-```
-
-需要本机 Chrome / Edge / Chromium；可用环境变量 `CHROME_PATH` 指定浏览器路径。截图输出到被忽略的 `test-results/`。
-
 ## 项目文档
 
 - [贡献指南](.github/CONTRIBUTING.md)：开发、提交 issue/PR 和发布流程。
 - [安全说明](.github/SECURITY.md)：API Key、Cookie、课程信息等敏感内容处理方式。
 - [更新日志](docs/CHANGELOG.md)：版本变化记录。
 - [许可和来源说明](NOTICE.md)：OCS 和 easy-us 的来源与许可说明。
-
-## 仓库结构
-
-- `packages/core`：工作器、题目处理、通用工具。
-- `packages/scripts`：学习通适配、页面 UI、AI 配置和答题逻辑。
-- `packages/utils`：用户脚本生成工具。
-- `vendor/easy-us`：随仓库保留的补丁版 UI 依赖，用于保持当前悬浮窗口行为。
-- `scripts`：本地开发和构建脚本。
-- `tests`：答题、缓存、图片、主题和网页桥接回归测试。
-- `docs`：更新记录、实验功能说明及图标。
-
-样式只维护 `packages/scripts/assets/css/style.css`，已移除未参与构建的重复 LESS。`node_modules/`、各包的 `lib/`、浏览器截图和 `dist/` 都是本地生成物，不应提交到源码仓库。
-
-## Vendored 依赖
-
-`vendor/easy-us` 来自 easy-us 项目，按 MIT License 随仓库保留。本项目依赖其中经过调整的悬浮窗口行为，因此没有直接使用 npm 安装的原版包。相关来源和许可见 [NOTICE.md](NOTICE.md)。
-
-## 注意
-
-本项目仅用于学习、研究和技术交流。使用时请遵守学校、课程和平台规则，不建议用于违反课程要求或平台规则的场景。
-
-AI 输出可能存在错误，提交前应自行核对结果。反馈问题时请勿公开 API Key、Cookie、账号、课程个人信息或未打码的敏感截图。
 
 ## 致谢
 

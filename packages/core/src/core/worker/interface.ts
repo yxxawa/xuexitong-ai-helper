@@ -25,6 +25,8 @@ export type AnswerMatchMode = 'exact' | 'similar';
 
 /** 答题器上下文 */
 export interface WorkContext<E> {
+	/** Re-check before each asynchronous DOM write, not just before resolving a question. */
+	isCancelled?: () => boolean;
 	root: HTMLElement;
 	elements: SearchedElements<E, HTMLElement[]>;
 	searchInfos: SearchInformation[];

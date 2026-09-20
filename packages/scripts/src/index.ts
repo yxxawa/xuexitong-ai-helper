@@ -11,3 +11,5 @@ export { RenderScript } from './render';
 export function definedProjects(): Project[] {
 	return [CXProject, CommonProject];
 }
+
+export { startDeepSeekBridge } from './utils/web-ai';

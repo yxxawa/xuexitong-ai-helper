@@ -6,18 +6,18 @@ import { MessageAttrs } from 'easy-us/lib/interfaces/custom-window';
 import { hasAnswerProvider } from './ai';
 
 export interface CommonWorkOptions {
+	aiProvider?: 'api' | 'deepseek-web';
 	period: number;
 	thread: number;
 	upload: WorkUploadType;
 	aiApiUrl: string;
 	aiApiKey: string;
 	aiModel: string;
-	aiPrompt: string;
+	webActivityId?: string;
 	aiTemperature: number;
 	aiMaxTokens: number;
 	aiUseResponseFormat: boolean;
 	aiVisionMode?: 'auto' | 'support' | 'unsupported';
-	aiVisionModels?: string;
 	stopSecondWhenFinish: number;
 	redundanceWordsText: string;
 	answerSeparators: string;

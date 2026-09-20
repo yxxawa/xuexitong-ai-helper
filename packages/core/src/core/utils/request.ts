@@ -1,11 +1,13 @@
 import { $ } from '../../utils/common';
 
-/**
- * 发起请求
- * @param url 请求地址
- * @param opts 请求参数
- */
-export function request<T extends 'json' | 'text'>(
+function httpError(status: number, body: any) {
+	const text = typeof body === 'string' ? body : JSON.stringify(body);
+	const error = new Error('HTTP ' + status + ': ' + (text || '请求失败'));
+	return Object.assign(error, { status, response: body });
+}
+
+/** Shared transport: reject HTTP errors and always bound network waits. */
+export async function request<T extends 'json' | 'text'>(
 	url: string,
 	opts: {
 		type: 'fetch' | 'GM_xmlhttpRequest';
@@ -13,73 +15,67 @@ export function request<T extends 'json' | 'text'>(
 		responseType?: T;
 		headers?: Record<string, string>;
 		data?: Record<string, any>;
+		timeout?: number;
 	}
 ): Promise<T extends 'json' ? any : string> {
-	return new Promise((resolve, reject) => {
-		try {
-			/** 默认参数 */
-			const { responseType = 'json', method = 'get', type = 'fetch', data = {}, headers = {} } = opts || {};
-			/** 环境变量 */
-			const env = $.isInBrowser() ? 'browser' : 'node';
-
-			/** 如果是跨域模式并且是浏览器环境 */
-			if (type === 'GM_xmlhttpRequest' && env === 'browser') {
-				if (typeof GM_xmlhttpRequest !== 'undefined') {
-					const contentType = headers['Content-Type'] || headers['content-type'];
-					const requestData =
-						contentType === 'application/x-www-form-urlencoded'
-							? new URLSearchParams(data).toString()
-							: Object.keys(data).length
-							? JSON.stringify(data)
-							: undefined;
-					// eslint-disable-next-line no-undef
-					GM_xmlhttpRequest({
-						url,
-						method: method.toUpperCase() as 'GET' | 'HEAD' | 'POST',
-						data: requestData,
-						headers: Object.keys(headers).length ? headers : undefined,
-						responseType: responseType === 'json' ? 'json' : undefined,
-						onload: (response) => {
-							if (response.status === 200) {
-								if (responseType === 'json') {
-									try {
-										resolve(JSON.parse(response.responseText));
-									} catch (error) {
-										reject(error);
-									}
-								} else {
-									resolve(response.responseText || '');
-								}
-							} else {
-								reject(response.responseText);
-							}
-						},
-						onerror: (err) => {
-							console.error('GM_xmlhttpRequest error', err);
-							reject(err);
-						}
-					});
-				} else {
-					reject(new Error('GM_xmlhttpRequest is not defined'));
-				}
-			} else {
-				const fet: typeof fetch = env === 'node' ? require('node-fetch').default : fetch;
-
-				fet(url, { body: method === 'post' ? JSON.stringify(data) : undefined, method, headers })
-					.then((response) => {
-						if (responseType === 'json') {
-							response.json().then(resolve).catch(reject);
-						} else {
-							// @ts-ignore
-							response.text().then(resolve).catch(reject);
-						}
-					})
-					.catch((error) => {
-						reject(new Error(error));
-					});
+	const { responseType = 'json', method = 'get', type = 'fetch', data = {}, headers = {}, timeout = 60000 } = opts;
+	const contentType = headers['Content-Type'] || headers['content-type'];
+	const body =
+		contentType === 'application/x-www-form-urlencoded'
+			? new URLSearchParams(data).toString()
+			: Object.keys(data).length
+			? JSON.stringify(data)
+			: undefined;
+	if (type === 'GM_xmlhttpRequest' && $.isInBrowser()) {
+		return new Promise((resolve, reject) => {
+			if (typeof GM_xmlhttpRequest === 'undefined') {
+				reject(new Error('GM_xmlhttpRequest is not defined'));
+				return;
 			}
-		} catch (error) {
-			reject(error);
-		}
-	});
+			GM_xmlhttpRequest({
+				url,
+				method: method.toUpperCase() as 'GET' | 'HEAD' | 'POST',
+				data: method === 'post' ? body : undefined,
+				headers,
+				responseType: responseType === 'json' ? 'json' : undefined,
+				timeout,
+				onload: (response) => {
+					if (response.status < 200 || response.status >= 300) {
+						reject(httpError(response.status, response.response ?? response.responseText));
+						return;
+					}
+					try {
+						resolve(
+							responseType === 'json'
+								? response.response && typeof response.response === 'object'
+									? response.response
+									: JSON.parse(response.responseText || 'null')
+								: response.responseText || ''
+						);
+					} catch {
+						reject(new Error('接口没有返回有效的 JSON，请检查接口地址。'));
+					}
+				},
+				onerror: () => reject(new Error('网络请求失败，请检查网络、接口地址及脚本管理器的连接权限。')),
+				ontimeout: () => reject(new Error('请求超时，请重试或调整 AI 超时时间。')),
+				onabort: () => reject(new Error('请求已取消。'))
+			});
+		});
+	}
+	const controller = new AbortController();
+	const timer = setTimeout(() => controller.abort(), timeout);
+	try {
+		const fetcher: typeof fetch = $.isInBrowser() ? fetch : require('node-fetch');
+		const response = await fetcher(url, {
+			body: method === 'post' ? body : undefined,
+			method: method.toUpperCase(),
+			headers,
+			signal: controller.signal
+		});
+		const text = await response.text();
+		if (!response.ok) throw httpError(response.status, text);
+		return responseType === 'json' ? JSON.parse(text || 'null') : text;
+	} finally {
+		clearTimeout(timer);
+	}
 }

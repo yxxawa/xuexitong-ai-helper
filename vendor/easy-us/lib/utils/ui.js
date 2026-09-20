@@ -79,9 +79,10 @@ exports.$ui = {
         var _a, _b;
         const scriptPanel = (0, dom_1.h)('script-panel-element', { name: script.name });
         // 监听提示内容改变
-        script.onConfigChange('notes', (pre, curr) => {
+        const notesListener = script.onConfigChange('notes', (pre, curr) => {
             scriptPanel.notesContainer.innerHTML = script.cfg.notes || '';
         });
+        scriptPanel.cleanup = () => script.offConfigChange(notesListener);
         // 注入 panel 对象 ， 脚本可修改 panel 对象进行面板的内容自定义
         script.panel = scriptPanel;
         scriptPanel.notesContainer.innerHTML = ((_b = (_a = script.configs) === null || _a === void 0 ? void 0 : _a.notes) === null || _b === void 0 ? void 0 : _b.defaultValue) || '';
@@ -116,6 +117,7 @@ exports.$ui = {
         /** 设置区域主体 */
         const configsBody = (0, dom_1.h)('div', { className: 'configs-body' });
         configsBody.append(...Object.entries(configElements).map(([key, el]) => el));
+        configsContainer.hidden = Object.keys(configElements).length === 0;
         configsContainer.append(configsBody);
         return configsContainer;
     },
@@ -142,7 +144,7 @@ exports.$ui = {
                         elementClassName: config.elementClassName,
                         labelClassName: config.labelClassName,
                         providerClassName: config.providerClassName,
-                        enableForAttribute: config.enableForAttribute
+                        enableForAttribute: config.enableForAttribute !== false
                     });
                     element.store = store;
                     element.label.textContent = config.label;

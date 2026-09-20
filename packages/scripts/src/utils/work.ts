@@ -1,5 +1,13 @@
+import {
+	acquireWebActivity,
+	getWebActivity,
+	webActivityMessage,
+	watchWebActivity,
+	type WebActivityLease
+} from './web-activity';
+import { getQuestionImageURL } from './question';
 import type { SimplifyWorkResult, WorkerEvents, WorkResult } from '@xuexitong-ai-helper/core/src/core/worker/interface';
-import { $ui, $message, MessageElement, Script, h, CommonEventEmitter, cors, $elements } from 'easy-us';
+import { $ui, $message, MessageElement, Script, h, CommonEventEmitter, cors } from 'easy-us';
 import { CommonProject } from '../projects/common';
 import { CommonWorkOptions, workPreCheckMessage } from '.';
 import { hasAnswerProvider } from './ai';
@@ -20,8 +28,6 @@ export function commonWork(
 		onWorkerCreated?: (worker: CommonEventEmitter<WorkerEvents>) => void | Promise<void>;
 	}
 ) {
-	// 置顶当前脚本
-	CommonProject.scripts.render.methods.pin(script);
 	let worker: CommonEventEmitter<WorkerEvents> | undefined;
 
 	/**
@@ -37,34 +43,25 @@ export function commonWork(
 	 * 是否正在运行
 	 */
 	let running = false;
+	let starting = false;
+	let activity: WebActivityLease | undefined;
+	globalControlPanel = null;
 
 	/** 显示答题控制按钮 */
 	const createWorkControlPanel = () => {
 		const { completeBtn, controlBtn, restartBtn, startBtn } = createWorkerControl({
 			workerProvider: () => worker,
+			activityId: () => activity?.id,
 			onStart: async () => {
 				startBtnPressed = true;
 				if (checkMessage instanceof MessageElement) {
 					checkMessage.remove();
 				}
 				await closeAIConfigEmptyWarning();
-				start();
+				return start();
 			},
-			onRestart: async () => {
-				worker?.emit('close');
-				await options.onRestart?.();
-				start();
-			},
-			onCompleteUnfinished: async () => {
-				const indexes = await getUnfinishedQuestionIndexes();
-				if (indexes.length === 0) {
-					$message.info('没有检测到未完成题。');
-					return;
-				}
-				worker?.emit('close');
-				await options.onRestart?.();
-				start(indexes);
-			}
+			onRestart: () => start(undefined, true),
+			onCompleteUnfinished: () => start(undefined, true, true)
 		});
 
 		startBtn.style.flex = '1';
@@ -93,8 +90,9 @@ export function commonWork(
 		sync_script.push(CommonProject.scripts.workResults);
 	}
 
+	const renderPanels: (() => void)[] = [];
 	for (const script of sync_script) {
-		script.on('render', () => {
+		const renderPanel = () => {
 			let gotoSettingsBtnContainer: string | HTMLElement = '';
 			if (checkFailed) {
 				const gotoSettingsBtn = $ui.button('👉 前往AI设置', {
@@ -112,11 +110,13 @@ export function commonWork(
 			script.panel?.body?.replaceChildren(
 				h('div', { style: { marginTop: '12px' } }, [
 					gotoSettingsBtnContainer,
-					...(options.enable_control_panel ? [globalControlPanel || createWorkControlPanel().container] : []),
+					...(options.enable_control_panel ? [createWorkControlPanel().container] : []),
 					workResultPanel()
 				])
 			);
-		});
+		};
+		script.on('render', renderPanel);
+		renderPanels.push(renderPanel);
 	}
 
 	const getWorkOptions = () => CommonProject.scripts.settings.methods.getWorkOptions();
@@ -134,7 +134,7 @@ export function commonWork(
 		start_delay_seconds: options.start_delay_seconds
 	});
 
-	['aiApiUrl', 'aiApiKey', 'aiModel'].forEach((key) => {
+	['aiApiUrl', 'aiApiKey', 'aiModel', 'aiProvider'].forEach((key) => {
 		(CommonProject.scripts.settings as any).onConfigChange(key, () => {
 			if (hasAnswerProvider(getWorkOptions())) {
 				checkFailed = false;
@@ -146,38 +146,72 @@ export function commonWork(
 		});
 	});
 
-	const start = async (questionIndexes?: number[]) => {
-		const workOptions = {
-			...getWorkOptions(),
-			questionIndexes,
-			appendOnly: Boolean(questionIndexes?.length)
-		};
-		if (hasAnswerProvider(workOptions) === false) {
-			checkFailed = true;
-			aiConfigEmptyWarning(0);
-			return;
-		}
-
-		checkFailed = false;
-		await closeAIConfigEmptyWarning();
-		await options.beforeRunning?.();
-		running = true;
-		worker = options.workerProvider(workOptions);
-
-		if (worker) {
-			options.onWorkerCreated?.(worker);
-		}
-
-		const { container, controlBtn } = createWorkControlPanel();
-		// 更新状态
-		script.panel?.body?.replaceChildren(container, workResultPanel());
-
-		worker?.once('done', () => {
+	const start = async (questionIndexes?: number[], replace = false, unfinished = false) => {
+		if (starting || (running && !replace)) return;
+		starting = true;
+		try {
+			if (replace) {
+				if (running) $message.info('正在停止；等待已发出的请求返回后重启，避免重复请求。');
+				worker?.emit('close');
+				// Let an already sent request settle before replacing its worker; do not send it twice.
+				await (worker as any)?.waitForIdle?.();
+				running = false;
+				if (unfinished) {
+					questionIndexes = await getUnfinishedQuestionIndexes();
+					if (!questionIndexes.length) {
+						$message.info('没有检测到未完成题。');
+						return;
+					}
+				}
+				await options.onRestart?.();
+			}
+			const workOptions: CommonWorkOptions = {
+				...getWorkOptions(),
+				questionIndexes,
+				appendOnly: Boolean(questionIndexes?.length)
+			};
+			if (!hasAnswerProvider(workOptions)) {
+				checkFailed = true;
+				aiConfigEmptyWarning(0);
+				return;
+			}
+			checkFailed = false;
+			await closeAIConfigEmptyWarning();
+			await options.beforeRunning?.();
+			if (workOptions.aiProvider === 'deepseek-web' && !activity) activity = await acquireWebActivity('work');
+			workOptions.webActivityId = activity?.id;
+			activity?.assertActive();
+			running = true;
+			worker = options.workerProvider(workOptions);
+			const currentWorker = worker;
+			const { container, controlBtn } = createWorkControlPanel();
+			script.panel?.body?.replaceChildren(container, workResultPanel());
+			worker?.once('done', () => {
+				if (worker !== currentWorker) return;
+				running = false;
+				if (!starting) {
+					activity?.release();
+					activity = undefined;
+				}
+				globalControlPanel = null;
+				controlBtn.disabled = true;
+			});
+			if (worker) await options.onWorkerCreated?.(worker);
+			else running = false;
+		} catch (error) {
 			running = false;
-			globalControlPanel = null;
-			controlBtn.disabled = true;
-		});
+			$message.error(error instanceof Error ? error.message : String(error));
+		} finally {
+			starting = false;
+			if (!running) {
+				activity?.release();
+				activity = undefined;
+			}
+		}
 	};
+	// Register render handlers BEFORE pinning; otherwise the initial render is missed.
+	CommonProject.scripts.render.methods.pin(script);
+	renderPanels[0]?.();
 }
 
 /**
@@ -185,30 +219,51 @@ export function commonWork(
  */
 export function createWorkerControl(options: {
 	workerProvider: () => CommonEventEmitter<WorkerEvents> | undefined;
-	onStart: () => void;
-	onRestart: () => void;
-	onCompleteUnfinished: () => void;
+	onStart: () => void | Promise<void>;
+	onRestart: () => void | Promise<void>;
+	onCompleteUnfinished: () => void | Promise<void>;
+	activityId?: () => string | undefined;
 }) {
-	let stop = false;
+	let stop = Boolean((options.workerProvider() as any)?.isStop);
 	let stopMessage: MessageElement | undefined;
 	const startBtn = $ui.button('▶️开始答题');
 	const completeBtn = $ui.button('🧩补全未完成');
 	const restartBtn = $ui.button('🔃重新答题');
-	const controlBtn = $ui.button('⏸暂停');
+	const controlBtn = $ui.button(stop ? '▶️继续' : '⏸暂停');
 
-	startBtn.onclick = () => {
-		startBtn.remove();
-		options.onStart();
+	let actionPending = false;
+	const refresh = () => {
+		const active = CommonProject.scripts.settings.cfg.aiProvider === 'deepseek-web' ? getWebActivity() : undefined;
+		const blocked = active && active.id !== options.activityId?.();
+		[startBtn, restartBtn, completeBtn].forEach((button) => {
+			button.disabled = actionPending || Boolean(blocked);
+			button.title = blocked ? webActivityMessage(active!) : '';
+		});
 	};
-	restartBtn.onclick = () => {
-		// 重新答题时，清除暂停提示
+	watchWebActivity(completeBtn, refresh);
+	const action = (run: () => void | Promise<void>) => async () => {
+		if (actionPending) return;
+		const active = CommonProject.scripts.settings.cfg.aiProvider === 'deepseek-web' ? getWebActivity() : undefined;
+		if (active && active.id !== options.activityId?.()) {
+			$message.warn(webActivityMessage(active));
+			return;
+		}
+		actionPending = true;
+		[startBtn, restartBtn, completeBtn].forEach((button) => {
+			button.disabled = true;
+		});
 		stopMessage?.remove();
-		options.onRestart();
+		try {
+			await run();
+		} finally {
+			actionPending = false;
+			refresh();
+		}
 	};
-	completeBtn.onclick = () => {
-		stopMessage?.remove();
-		options.onCompleteUnfinished();
-	};
+	startBtn.onclick = action(options.onStart);
+	restartBtn.onclick = action(options.onRestart);
+	completeBtn.onclick = action(options.onCompleteUnfinished);
+
 	controlBtn.onclick = () => {
 		stop = !stop;
 		const worker = options.workerProvider();
@@ -251,14 +306,14 @@ export function optimizationElementWithImage(root: HTMLElement, clone_node: bool
 		// 如果已经存在识别结果，则不处理
 		if (
 			Array.from(img.parentElement!.querySelectorAll('span')).some(
-				(e) => e.style.fontSize === '0px' && e.textContent?.includes(img.src)
+				(e) => e.style.fontSize === '0px' && e.textContent?.includes(getQuestionImageURL(img))
 			)
 		) {
 			continue;
 		}
 
 		const src = document.createElement('span');
-		src.innerText = img.src;
+		src.innerText = getQuestionImageURL(img);
 		// 隐藏图片，但不影响 innerText 的获取
 		src.style.fontSize = '0px';
 		img.after(src);
@@ -271,7 +326,7 @@ export function optimizationElementWithImage(root: HTMLElement, clone_node: bool
  */
 export function createUnVisibleTextOfImage(img: HTMLImageElement) {
 	const src = document.createElement('span');
-	src.innerText = img.src;
+	src.innerText = getQuestionImageURL(img);
 	// 隐藏图片，但不影响 innerText 的获取
 	src.style.fontSize = '0px';
 	img.after(src);
@@ -335,9 +390,6 @@ export const aiConfigEmptyWarning = cors.defineTopFunction((duration: number) =>
 	const setting = h('button', { className: 'base-style-button-secondary' }, 'AI设置');
 	setting.onclick = () => {
 		CommonProject.scripts.render.methods.pin(CommonProject.scripts.settings);
-		setTimeout(() => {
-			$elements.root?.querySelector<HTMLElement>('[value="点击配置"]')?.click();
-		}, 500);
 	};
 
 	aiConfigEmptyMessage?.remove();

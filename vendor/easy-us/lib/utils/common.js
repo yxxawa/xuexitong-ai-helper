@@ -92,7 +92,7 @@ exports.$ = {
                     // 平台域名是否匹配
                     if (project.domains === undefined ||
                         project.domains.length === 0 ||
-                        project.domains.some((d) => urls.some((url) => new URL(url).origin.includes(d)))) {
+                        project.domains.some((d) => urls.some((url) => (() => { try { const hostname = new URL(url).hostname.toLowerCase(); return hostname === d.toLowerCase() || hostname.endsWith('.' + d.toLowerCase()); } catch { return false; } })()))) {
                         // 被排除的网页
                         if (script_excludes_urls.some((u) => urls.some((url) => RegExp(u).test(url)))) {
                             continue;

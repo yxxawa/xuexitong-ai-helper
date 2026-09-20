@@ -1,18 +1,28 @@
+import { getWebBridgeState, requestWebAnswer } from './web-ai';
+import {
+	getVisionCapability,
+	rememberVisionCapability,
+	rememberVisionCapabilities,
+	modelSupportsImages,
+	isVisionUnsupportedError,
+	type VisionOptions
+} from './vision';
 import type { QuestionTypes } from '@xuexitong-ai-helper/core/src/core/worker/interface';
 import type { SearchInformation } from '@xuexitong-ai-helper/core/src/core/worker/search.interface';
 import { request } from '@xuexitong-ai-helper/core/src/core/utils/request';
 
 export interface AIAnswererOptions {
+	aiProvider?: 'api' | 'deepseek-web';
 	aiApiUrl: string;
 	aiApiKey: string;
 	aiModel: string;
-	aiPrompt: string;
+	webActivityId?: string;
 	aiTemperature: number;
 	aiMaxTokens: number;
 	aiUseResponseFormat: boolean;
 	aiShowSolution?: boolean;
+	aiAnswerTimeout?: number;
 	aiVisionMode?: 'auto' | 'support' | 'unsupported';
-	aiVisionModels?: string;
 }
 
 export interface AIQuestionPayload {
@@ -21,11 +31,13 @@ export interface AIQuestionPayload {
 	options?: string[] | string;
 	lineOptions?: AILineOptionGroup[];
 	hasImage?: boolean;
+	unresolvedImageCount?: number;
 	imageUrls?: string[];
 }
 
 export interface AILineOptionGroup {
 	index: number;
+	title?: string;
 	options: AILineOption[];
 }
 
@@ -36,7 +48,7 @@ export interface AILineOption {
 
 export interface AIModelInfo {
 	id: string;
-	supportsVision: boolean;
+	supportsVision?: boolean;
 }
 
 type AIProvider = 'openai' | 'anthropic';
@@ -63,19 +75,10 @@ const AI_SOLUTION_PROMPT = [
 	'如果题目是选择/判断题，solution 说明关键依据；如果是填空/计算题，solution 给出必要计算步骤。'
 ].join('\n');
 
-const LEGACY_DEFAULT_AI_PROMPT = [
-	'你是在线课程答题助手。必须只输出 JSON，不要输出 Markdown、解释、推理过程或多余文本。',
-	'输出格式固定为：{"answer":"答案","answers":["答案"]}。',
-	'单选题、判断题：answer 填一个答案，answers 只放这一个答案。',
-	'多选题：必须返回全部正确选项，answers 放多个答案，answer 用 # 连接这些答案，例如 {"answer":"选项一#选项二","answers":["选项一","选项二"]}。',
-	'填空题：多个空也放到 answers，并用 # 连接到 answer。',
-	'如果题目给了选项，必须优先返回选项原文，不要只返回 A、B、C、D。',
-	'只有无法确定或无法复制选项原文时，才允许返回选项字母。',
-	'如果不确定，也只返回最可能的答案，不要解释。'
-].join('\n');
-
 export function isAIAnswererReady(opts: Partial<AIAnswererOptions>) {
-	return Boolean(opts.aiApiUrl?.trim() && opts.aiApiKey?.trim() && opts.aiModel?.trim());
+	return opts.aiProvider === 'deepseek-web'
+		? Boolean(getWebBridgeState())
+		: Boolean(opts.aiApiUrl?.trim() && opts.aiApiKey?.trim() && opts.aiModel?.trim());
 }
 
 export function hasAnswerProvider(opts: Partial<AIAnswererOptions>) {
@@ -103,34 +106,37 @@ export async function fetchAIModels(opts: Pick<AIAnswererOptions, 'aiApiUrl' | '
 		headers: createAIHeaders(modelRequest.provider, opts.aiApiKey)
 	});
 
-	return parseModelInfos(response);
+	const models = parseModelInfos(response);
+	rememberVisionCapabilities(
+		models
+			.filter((model) => model.supportsVision !== undefined)
+			.map((model) => ({
+				opts: { ...opts, aiModel: model.id },
+				state: model.supportsVision ? 'supported' : 'unsupported',
+				source: 'metadata'
+			}))
+	);
+	return models;
 }
 
-export function isVisionModel(opts: Pick<AIAnswererOptions, 'aiModel' | 'aiVisionMode' | 'aiVisionModels'>) {
-	const model = String(opts.aiModel || '').trim();
-	if (!model) {
-		return false;
-	}
-
-	if (opts.aiVisionMode === 'support') {
-		return true;
-	}
-	if (opts.aiVisionMode === 'unsupported') {
-		return false;
-	}
-
-	if (parseVisionModelList(opts.aiVisionModels).includes(model)) {
-		return true;
-	}
-
-	return modelNameLooksVision(model);
+export function canSendImageInput(opts: VisionOptions) {
+	// Do not use a real question as a capability probe. Unknown models need metadata, a test, or explicit opt-in.
+	return getVisionCapability(opts).state === 'supported';
 }
 
 export async function queryAIAnswerer(
 	opts: AIAnswererOptions,
-	question: AIQuestionPayload
+	question: AIQuestionPayload,
+	control: { retryEmptyContent?: boolean } = {}
 ): Promise<SearchInformation[]> {
+	if (opts.aiProvider === 'deepseek-web') return queryWebAnswerer(opts, question);
+	opts = { ...opts, aiApiUrl: opts.aiApiUrl.trim(), aiApiKey: opts.aiApiKey.trim(), aiModel: opts.aiModel.trim() };
 	const title = question.title.trim();
+	try {
+		if (!/^https?:$/.test(new URL(opts.aiApiUrl).protocol)) throw new Error();
+	} catch {
+		return [{ name: 'AI做题', results: [], error: '请输入有效的 http(s) AI 接口地址。' }];
+	}
 
 	if (!isAIAnswererReady(opts)) {
 		return [
@@ -143,19 +149,22 @@ export async function queryAIAnswerer(
 	}
 
 	const imageUrls = Array.from(new Set((question.imageUrls || []).map((url) => String(url).trim()).filter(Boolean)));
-	const supportsVision = isVisionModel(opts);
+	const supportsVision = canSendImageInput(opts);
 	const provider = resolveAIProvider(opts.aiApiUrl, opts.aiModel);
 
-	if (question.hasImage && !supportsVision) {
+	if ((question.hasImage || question.unresolvedImageCount || imageUrls.length > 0) && !supportsVision) {
 		return [
 			{
 				name: `AI做题${opts.aiModel ? `(${opts.aiModel})` : ''}`,
 				results: [],
-				error: '题目包含图片，当前 AI 模型未启用视觉能力，已跳过。',
+				error:
+					getVisionCapability(opts).state === 'unknown'
+						? '题干或选项含图片，模型图片能力尚未确认，已跳过。请在设置中检测图片能力或手动指定。'
+						: '题干或选项含图片，当前模型不支持图片，已跳过。',
 				data: {
 					model: opts.aiModel,
 					skipped: true,
-					reason: 'model_without_vision',
+					reason: getVisionCapability(opts).state === 'unknown' ? 'vision_unknown' : 'model_without_vision',
 					imageUrls
 				}
 			}
@@ -163,12 +172,9 @@ export async function queryAIAnswerer(
 	}
 
 	const options = Array.isArray(question.options)
-		? question.options.map((item) => replaceImageUrlsWithMarkers(item, imageUrls)).filter(Boolean)
+		? question.options.map((item) => replaceImageUrlsWithMarkers(item, imageUrls) || '（空选项）')
 		: question.options
-		? question.options
-				.split('\n')
-				.map((item) => replaceImageUrlsWithMarkers(item, imageUrls))
-				.filter(Boolean)
+		? question.options.split('\n').map((item) => replaceImageUrlsWithMarkers(item, imageUrls) || '（空选项）')
 		: [];
 
 	const questionTypeName = getQuestionTypeLabel(question.type);
@@ -194,6 +200,8 @@ export async function queryAIAnswerer(
 	let data: Record<string, any> = createAIRequestBody(provider, opts, question.type, userPrompt, []);
 
 	try {
+		if (question.unresolvedImageCount || (question.hasImage && imageUrls.length === 0))
+			throw new Error('题目包含图片，但未能读取图片地址，请等待图片加载后重试。');
 		if (supportsVision && imageUrls.length) {
 			imageTransport = 'base64';
 			const imageInputs = await resolveAIImageInputs(imageUrls);
@@ -228,13 +236,14 @@ export async function queryAIAnswerer(
 			data = createAIRequestBody(provider, opts, question.type, userPrompt, []);
 		}
 
-		let response: any = await requestAI(requestUrl, provider, opts.aiApiKey, data);
+		let response: any = await requestAI(requestUrl, provider, opts.aiApiKey, data, opts);
+		if (imageUrls.length) rememberVisionCapability(opts, 'supported', 'request');
 		let retryInfo: Record<string, any> | undefined;
-		if (shouldRetryForEmptyFinalContent(response)) {
+		if (control.retryEmptyContent !== false && shouldRetryForEmptyFinalContent(response)) {
 			const firstResponse = response;
 			const retryData = createFinalJsonRetryData(provider, data, opts);
 			try {
-				const retryResponse = await requestAI(requestUrl, provider, opts.aiApiKey, retryData);
+				const retryResponse = await requestAI(requestUrl, provider, opts.aiApiKey, retryData, opts);
 				response = retryResponse;
 				data = retryData;
 				retryInfo = {
@@ -264,49 +273,42 @@ export async function queryAIAnswerer(
 		let tokenUsage = retryInfo?.retry_token_usage
 			? mergeTokenUsage(retryInfo.first_token_usage, retryInfo.retry_token_usage)
 			: resolveTokenUsage(response);
-		let multipleAnswerMayBeIncomplete =
-			isMultipleQuestion(question.type) && normalizedAnswer !== '' && normalizedAnswer.split('#').filter(Boolean).length < 2;
-
-		if (multipleAnswerMayBeIncomplete) {
+		// Retry malformed/out-of-range choice answers once; a multi-select question may legitimately have one answer.
+		if (
+			!retryInfo &&
+			control.retryEmptyContent !== false &&
+			!normalizedAnswer &&
+			options.length &&
+			(isSingleQuestion(question.type) || isMultipleQuestion(question.type) || isJudgementQuestion(question.type))
+		) {
 			const retryData = JSON.parse(JSON.stringify(data));
 			retryData.messages.push(
-				{
-					role: 'assistant',
-					content: createAssistantMessageContent(
-						provider,
-						JSON.stringify({ answer: normalizedAnswer, answers: normalizedAnswer.split('#').filter(Boolean) })
-					)
-				},
+				{ role: 'assistant', content: createAssistantMessageContent(provider, String(rawContent || '{}')) },
 				{
 					role: 'user',
 					content: createUserMessageContent(
 						provider,
-						'这是多选题。你上次只返回了一个答案，请重新判断并返回所有正确选项。必须只输出 JSON，格式为 {"answer":"选项一#选项二","answers":["选项一","选项二"]}。',
+						'上次答案不能匹配本题选项。请重新输出最终 JSON。' + createChoiceOutputHint(question.type, options),
 						[]
 					)
 				}
 			);
-			const retryResponse = await requestAI(requestUrl, provider, opts.aiApiKey, retryData);
-			const retryRawContent = getAIContent(retryResponse);
-			const retrySolution = normalizeAISolution(resolveAISolution(retryRawContent, retryResponse));
-			const retryAnswer = normalizeAnswerByQuestionType(
-				resolveAIAnswer(retryRawContent),
-				question.type,
-				question.lineOptions,
-				options,
-				{
-					solution: retrySolution,
-					rawContent: retryRawContent,
-					response: retryResponse
-				}
-			);
-			if (retryAnswer.split('#').filter(Boolean).length > normalizedAnswer.split('#').filter(Boolean).length) {
-				response = retryResponse;
-				rawContent = retryRawContent;
+			try {
+				const retryResponse = await requestAI(requestUrl, provider, opts.aiApiKey, retryData, opts);
 				tokenUsage = mergeTokenUsage(tokenUsage, resolveTokenUsage(retryResponse));
-				normalizedAnswer = retryAnswer;
-				solution = retrySolution;
-				multipleAnswerMayBeIncomplete = retryAnswer.split('#').filter(Boolean).length < 2;
+				response = retryResponse;
+				data = retryData;
+				rawContent = getAIContent(response);
+				solution = normalizeAISolution(resolveAISolution(rawContent, response));
+				normalizedAnswer = normalizeAnswerByQuestionType(
+					resolveAIAnswer(rawContent),
+					question.type,
+					question.lineOptions,
+					options
+				);
+				retryInfo = { format_retry: true };
+			} catch (error) {
+				retryInfo = { format_retry_error: normalizeErrorMessage(error) };
 			}
 		}
 
@@ -340,14 +342,12 @@ export async function queryAIAnswerer(
 					solution,
 					retry: retryInfo
 				},
-				error: normalizedAnswer
-					? multipleAnswerMayBeIncomplete
-						? 'AI疑似只返回了一个多选答案，请核对。'
-						: undefined
-					: 'AI没有返回可解析的 answer 字段。'
+				error: normalizedAnswer ? undefined : 'AI答案格式不正确或超出本题选项范围，未自动填写，请重试或手动核对。'
 			}
 		];
 	} catch (err) {
+		const visionUnsupported = imageUrls.length > 0 && isVisionUnsupportedError(normalizeErrorMessage(err));
+		if (visionUnsupported) rememberVisionCapability(opts, 'unsupported', 'request');
 		return [
 			{
 				name: `AI做题${opts.aiModel ? `(${opts.aiModel})` : ''}`,
@@ -358,6 +358,8 @@ export async function queryAIAnswerer(
 				data: {
 					...summarizeAIRequestData(data),
 					image_transport: imageTransport,
+					skipped: visionUnsupported,
+					reason: visionUnsupported ? 'model_without_vision' : undefined,
 					raw_content: normalizeErrorMessage(err),
 					parsed_answer: ''
 				},
@@ -367,14 +369,23 @@ export async function queryAIAnswerer(
 	}
 }
 
-function requestAI(requestUrl: string, provider: AIProvider, apiKey: string, data: Record<string, any>) {
-	return request(requestUrl, {
-			type: 'GM_xmlhttpRequest',
-			method: 'post',
-			responseType: 'json',
-			headers: createAIHeaders(provider, apiKey),
-			data
-		});
+async function requestAI(
+	requestUrl: string,
+	provider: AIProvider,
+	apiKey: string,
+	data: Record<string, any>,
+	opts?: AIAnswererOptions
+) {
+	const response = await request(requestUrl, {
+		type: 'GM_xmlhttpRequest',
+		method: 'post',
+		responseType: 'json',
+		headers: createAIHeaders(provider, apiKey),
+		timeout: Math.max(5000, Number(opts?.aiAnswerTimeout || 60) * 1000),
+		data
+	});
+	if (response?.error) throw Object.assign(new Error(normalizeErrorMessage(response)), { response });
+	return response;
 }
 
 function createAIRequestBody(
@@ -455,26 +466,50 @@ async function resolveAIImageInputs(imageUrls: string[]): Promise<AIImageInput[]
 	return results;
 }
 
-function downloadImageAsDataURL(url: string): Promise<string> {
-	return new Promise((resolve, reject) => {
-		downloadImageAsBlob(url)
-			.then((blob) => {
-			if (!blob || blob.size === 0) {
-				reject(new Error('图片内容为空'));
-				return;
+async function downloadImageAsDataURL(url: string): Promise<string> {
+	if (/^data:image\/(?:png|jpe?g|webp|gif);base64,/i.test(url)) return url;
+	const blob = await downloadImageAsBlob(url);
+	if (!blob || blob.size === 0) throw new Error('图片内容为空');
+	if (blob.type && !blob.type.startsWith('image/') && blob.type !== 'application/octet-stream')
+		throw new Error('图片地址返回的不是图片，可能需要重新登录。');
+	const dataUrl = await new Promise<string>((resolve, reject) => {
+		const reader = new FileReader();
+		reader.onload = () => resolve(String(reader.result || ''));
+		reader.onerror = () => reject(reader.error || new Error('图片读取失败'));
+		reader.readAsDataURL(blob);
+	});
+	if (/^data:image\/(?:png|jpe?g|webp|gif);base64,/i.test(dataUrl)) return dataUrl;
+	// Convert SVG/AVIF and other browser-readable formats instead of mislabelling their bytes as PNG.
+	return new Promise<string>((resolve, reject) => {
+		const image = new Image();
+		const timer = setTimeout(() => reject(new Error('图片格式转换超时')), 15000);
+		image.onload = () => {
+			clearTimeout(timer);
+			try {
+				if (!image.naturalWidth || !image.naturalHeight) throw new Error('无法读取图片尺寸');
+				const scale = Math.min(1, 4096 / Math.max(image.naturalWidth, image.naturalHeight));
+				const canvas = document.createElement('canvas');
+				canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+				canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+				const context = canvas.getContext('2d');
+				if (!context) throw new Error('无法转换图片格式');
+				context.drawImage(image, 0, 0, canvas.width, canvas.height);
+				resolve(canvas.toDataURL('image/png'));
+			} catch (error) {
+				reject(error);
 			}
-			const reader = new FileReader();
-			reader.onload = () => resolve(String(reader.result || ''));
-			reader.onerror = () => reject(reader.error || new Error('图片读取失败'));
-			reader.readAsDataURL(blob);
-			})
-			.catch(reject);
+		};
+		image.onerror = () => {
+			clearTimeout(timer);
+			reject(new Error('无法解析图片，请检查图片是否已加载'));
+		};
+		image.src = dataUrl;
 	});
 }
 
 function downloadImageAsBlob(url: string): Promise<Blob> {
 	return new Promise((resolve, reject) => {
-		if (typeof GM_xmlhttpRequest !== 'undefined') {
+		if (typeof GM_xmlhttpRequest !== 'undefined' && /^https?:/i.test(url)) {
 			GM_xmlhttpRequest({
 				url,
 				method: 'GET',
@@ -497,15 +532,18 @@ function downloadImageAsBlob(url: string): Promise<Blob> {
 			return;
 		}
 
-		fetch(url, { credentials: 'include' })
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), 15000);
+		fetch(url, { credentials: 'include', signal: controller.signal })
 			.then((response) => {
-			if (!response.ok) {
-				throw new Error(`图片下载失败，HTTP ${response.status}`);
-			}
-			return response.blob();
-		})
+				if (!response.ok) {
+					throw new Error(`图片下载失败，HTTP ${response.status}`);
+				}
+				return response.blob();
+			})
 			.then(resolve)
-			.catch(reject);
+			.catch(reject)
+			.finally(() => clearTimeout(timeout));
 	});
 }
 
@@ -518,10 +556,10 @@ function getAIContent(response: any) {
 	return (
 		readTextContent(response?.content) ||
 		(response?.choices?.[0]?.message?.content ??
-		response?.choices?.[0]?.text ??
-		response?.answer ??
-		response?.data?.answer ??
-		'')
+			response?.choices?.[0]?.text ??
+			response?.answer ??
+			response?.data?.answer ??
+			'')
 	);
 }
 
@@ -564,7 +602,9 @@ function getAIReasoningContentForDisplay(response: any) {
 }
 
 function getAIFinishReason(response: any) {
-	return String(response?.choices?.[0]?.finish_reason || response?.finish_reason || response?.data?.finish_reason || '').trim();
+	return String(
+		response?.choices?.[0]?.finish_reason || response?.finish_reason || response?.data?.finish_reason || ''
+	).trim();
 }
 
 function readTextContent(content: any) {
@@ -608,6 +648,7 @@ function resolveAIAnswer(rawContent: any) {
 
 function pickAnswerFromObject(obj: any): string {
 	const answer =
+		(Array.isArray(obj?.answers) && obj.answers.length ? obj.answers : undefined) ??
 		obj?.answer ??
 		obj?.answers ??
 		obj?.result ??
@@ -617,12 +658,15 @@ function pickAnswerFromObject(obj: any): string {
 		obj?.choices?.[0]?.message?.answer ??
 		obj?.choices?.[0]?.message?.answers;
 	if (Array.isArray(answer)) {
-		return answer.map((item) => pickAnswerFromObject(item) || String(item)).join('#').trim();
+		return answer
+			.map((item) => pickAnswerFromObject(item) || String(item))
+			.join('#')
+			.trim();
 	}
 	if (answer && typeof answer === 'object') {
 		return pickAnswerFromObject(answer);
 	}
-	return String(answer || '').trim();
+	return String(answer ?? '').trim();
 }
 
 function resolveAISolution(rawContent: any, response?: any): string {
@@ -665,23 +709,19 @@ function normalizeAISolution(solution: string) {
 		.trim();
 }
 
-function createSystemPrompt(prompt: string, type: AIQuestionPayload['type'], showSolution?: boolean) {
-	const customPrompt = normalizeCustomPrompt(prompt);
-	const basePrompt = [
-		showSolution ? AI_SOLUTION_PROMPT : DEFAULT_AI_PROMPT,
-		customPrompt && customPrompt !== DEFAULT_AI_PROMPT ? `额外约束：${customPrompt}` : ''
-	].filter(Boolean);
+function createSystemPrompt(type: AIQuestionPayload['type'], showSolution?: boolean) {
+	const basePrompt = [showSolution ? AI_SOLUTION_PROMPT : DEFAULT_AI_PROMPT];
 
 	if (isSingleQuestion(type)) {
 		return [
 			...basePrompt,
-			'当前题型：单选题。answer 优先返回选项字母 A/B/C/D；如果题目不是按字母标注且选项原文明确，才返回选项原文。answers 只放这一个最终答案；不要把计算结果当作单选答案，计算结果只写在 solution。'
+			'当前题型：单选题。answer 必须返回本题选项列表中的一个字母（不限于 A/B/C/D），不能超出实际选项范围。answers 只放这一个最终答案；不要把计算结果当作单选答案，计算结果只写在 solution。'
 		].join('\n');
 	}
 	if (isMultipleQuestion(type)) {
 		return [
 			...basePrompt,
-			'当前题型：多选题。必须返回所有正确选项；answer 用 # 连接，answers 放多个元素；优先选项原文，无法确定原文时才用字母。'
+			'当前题型：多选题。返回所有正确选项的字母（不限于 A/B/C/D）；answer 用 # 连接，answers 按选项顺序列出字母。可以只有一个正确选项，不得为了凑数多选。'
 		].join('\n');
 	}
 	if (isJudgementQuestion(type)) {
@@ -702,13 +742,10 @@ function createSystemPrompt(prompt: string, type: AIQuestionPayload['type'], sho
 			'当前题型：连线题/匹配题。只返回每个下拉框要选择的 value/data 值；按页面顺序用 # 连接，如 {"answer":"b#d","answers":["b","d"]}。'
 		].join('\n');
 	}
-	return [
-		...basePrompt,
-		'当前题型未知。优先返回可直接填写或选择的最终答案；多答案用 # 连接。'
-	].join('\n');
+	return [...basePrompt, '当前题型未知。优先返回可直接填写或选择的最终答案；多答案用 # 连接。'].join('\n');
 }
 
-function normalizeAnswerByQuestionType(
+export function normalizeAnswerByQuestionType(
 	answer: string,
 	type: AIQuestionPayload['type'],
 	lineOptions?: AILineOptionGroup[],
@@ -720,13 +757,22 @@ function normalizeAnswerByQuestionType(
 		return normalizeSingleAnswer(answer, options, context);
 	}
 	if (isMultipleQuestion(type)) {
-		return answer
-			.replace(/[，、,；;|]+/g, '#')
-			.replace(/\s+#\s+/g, '#')
-			.replace(/#+/g, '#')
-			.replace(/^#|#$/g, '')
-			.trim();
+		const clean = answer.replace(/^(?:正确)?答案\s*[:：]?\s*/, '').trim();
+		const exactOption = options.some(
+			(option) => compactPromptText(option).toLowerCase() === compactPromptText(clean).toLowerCase()
+		);
+		const tokens =
+			!exactOption && /^[A-Z](?:[\s,#，、;；|/]*[A-Z])*$/i.test(clean)
+				? clean.replace(/[^a-z]/gi, '').split('')
+				: clean
+						.split(/[#，、,；;|/\n]+/)
+						.map((item) => item.trim())
+						.filter(Boolean);
+		const letters = tokens.map((token) => normalizeSingleAnswer(token, options));
+		if (!letters.length || letters.some((letter) => !isChoiceLetterInRange(letter, options.length || 26))) return '';
+		return Array.from(new Set(letters)).sort().join('#');
 	}
+
 	if (isCompletionQuestion(type)) {
 		return answer
 			.replace(/^答案[:：]\s*/g, '')
@@ -737,12 +783,23 @@ function normalizeAnswerByQuestionType(
 			.trim();
 	}
 	if (isJudgementQuestion(type)) {
+		const truth = (text: string) =>
+			/^(正确|对|是|√|true|yes)$/i.test(text.trim())
+				? true
+				: /^(错误|错|否|×|false|no)$/i.test(text.trim())
+				? false
+				: undefined;
+		const value = truth(answer);
+		if (value !== undefined) {
+			const index = options.findIndex((option) => truth(option.replace(/^[A-Z][.．、]\s*/i, '')) === value);
+			if (index >= 0) return String.fromCharCode(65 + index);
+		}
 		return normalizeSingleAnswer(
 			answer
-			.replace(/^答案[:：]\s*/g, '')
-			.replace(/^判断[:：]\s*/g, '')
-			.replace(/[。.!！\s]+$/g, '')
-			.trim(),
+				.replace(/^答案[:：]\s*/g, '')
+				.replace(/^判断[:：]\s*/g, '')
+				.replace(/[。.!！\s]+$/g, '')
+				.trim(),
 			options,
 			context
 		);
@@ -770,7 +827,14 @@ function isJudgementQuestion(type: AIQuestionPayload['type']) {
 
 function isLineQuestion(type: AIQuestionPayload['type']) {
 	const text = String(type || '').toLowerCase();
-	return text === 'line' || text.includes('连线') || text.includes('匹配') || text.includes('match');
+	return (
+		text === 'line' ||
+		text === 'reader' ||
+		text === 'fill' ||
+		text.includes('连线') ||
+		text.includes('匹配') ||
+		text.includes('match')
+	);
 }
 
 function getQuestionTypeLabel(type: AIQuestionPayload['type']) {
@@ -803,96 +867,48 @@ type AIAnswerContext = {
 	response?: any;
 };
 
-function normalizeSingleAnswer(answer: string, options: string[] = [], context: AIAnswerContext = {}) {
+function normalizeSingleAnswer(answer: string, options: string[] = [], _context: AIAnswerContext = {}) {
 	const clean = answer
-		.replace(/^答案[:：]\s*/g, '')
+		.replace(/^(?:(?:正确|最终)?答案|选项)\s*(?:是|为|[:：])?\s*/, '')
 		.replace(/[。.!！\s]+$/g, '')
 		.trim();
 	const optionCount = options.length || 26;
-
-	if (/^\d+$/.test(clean)) {
-		const index = Number(clean) - 1;
-		if (index >= 0 && index < optionCount) {
-			return String.fromCharCode(65 + index);
-		}
-	}
-
-	const letter = clean.match(/^(?:选项)?([A-Z])(?:[.．、,，:：\s]|$)/i)?.[1]?.toUpperCase();
-	if (letter) {
-		const index = letter.charCodeAt(0) - 65;
-		if (index >= 0 && index < optionCount) {
-			return letter;
-		}
-	}
-
-	const contextLetter = extractChoiceLetterFromAIContext(context, optionCount);
-	if (contextLetter) {
-		return contextLetter;
-	}
-
-	const normalizedClean = compactPromptText(clean).toLowerCase();
-	const optionIndex = options.findIndex((option) => {
-		const normalizedOption = compactPromptText(option).toLowerCase();
-		return normalizedOption === normalizedClean || normalizedOption.replace(/^[A-Z][.．、,，:：\s]*/i, '') === normalizedClean;
+	if (/^[A-Z]$/i.test(clean)) return isChoiceLetterInRange(clean.toUpperCase(), optionCount) ? clean.toUpperCase() : '';
+	// Check exact option text first: a numeric option such as "42" is not option number 42.
+	const index = options.findIndex((option) => {
+		const text = compactPromptText(option).toLowerCase();
+		return (
+			text === compactPromptText(clean).toLowerCase() ||
+			text.replace(/^[a-z][.．、]\s*/, '') === compactPromptText(clean).toLowerCase()
+		);
 	});
-	if (optionIndex >= 0) {
-		return options[optionIndex];
-	}
-
-	return clean;
+	if (index >= 0) return String.fromCharCode(65 + index);
+	const letter = clean.match(/^(?:选择?|选项)?\s*([A-Z])(?:[.．、:：]\s*.*)?$/i)?.[1]?.toUpperCase();
+	if (letter && isChoiceLetterInRange(letter, optionCount)) return letter;
+	if (/^\d+$/.test(clean) && Number(clean) >= 1 && Number(clean) <= optionCount)
+		return String.fromCharCode(64 + Number(clean));
+	return options.length ? '' : clean;
 }
 
 function createChoiceOutputHint(type: AIQuestionPayload['type'], options: string[]) {
-	if (!(isSingleQuestion(type) || isJudgementQuestion(type)) || options.length === 0) {
+	if (!(isSingleQuestion(type) || isMultipleQuestion(type) || isJudgementQuestion(type)) || options.length === 0)
 		return '';
-	}
-	return '选择题输出要求：如果能判断正确选项位置，answer 优先返回选项字母 A/B/C/D；当选项内容只是 A/B/C/D、图片选项或答案来自图片时，必须返回选项字母，不要返回图片中的选项内容、计算值或 1/2/3/4。';
-}
-
-function extractChoiceLetterFromAIContext(context: AIAnswerContext, optionCount: number) {
-	const texts = [
-		context.solution,
-		typeof context.rawContent === 'string' ? context.rawContent : stringifyCompact(context.rawContent),
-		typeof context.response === 'string' ? context.response : stringifyCompact(context.response)
-	]
-		.map((item) => normalizeChoiceText(item))
-		.filter(Boolean);
-
-	for (const text of texts) {
-		const letter = extractChoiceLetterFromText(text, optionCount);
-		if (letter) {
-			return letter;
-		}
-	}
-
-	return '';
-}
-
-function normalizeChoiceText(value: any) {
-	return String(value || '')
-		.replace(/\\n/g, '\n')
-		.replace(/\\"/g, '"')
-		.replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
-		.trim();
-}
-
-function extractChoiceLetterFromText(text: string, optionCount: number) {
-	const patterns = [
-		/(?:正确答案|最终答案|答案|正确选项|应选|应该选|故选|所以选|选择)\s*(?:为|是|[:：])?\s*([A-Z])/gi,
-		/(?:选|选项)\s*([A-Z])(?:\s*[项。.!！,，、;；:]|$)/gi,
-		/([A-Z])\s*(?:项|选项)?\s*(?:正确|为正确答案|是正确答案|符合题意)/gi
-	];
-
-	for (const pattern of patterns) {
-		for (const match of text.matchAll(pattern)) {
-			const letter = String(match[1] || '').toUpperCase();
-			if (isChoiceLetterInRange(letter, optionCount)) {
-				return letter;
-			}
-		}
-	}
-
-	return '';
+	const letters = options.map((_, index) => String.fromCharCode(65 + index));
+	const example =
+		isMultipleQuestion(type) && letters.length > 1
+			? [letters[0], letters[letters.length - 1]]
+			: [letters[letters.length - 1]];
+	return (
+		'本题共有 ' +
+		options.length +
+		' 个选项，合法字母仅为 ' +
+		letters.join('/') +
+		'。' +
+		(isMultipleQuestion(type) ? '按顺序返回全部正确字母；多选题也允许只有一个答案。' : '只能返回一个合法字母。') +
+		'格式示例（不代表正确答案）：' +
+		JSON.stringify({ answer: example.join('#'), answers: example }) +
+		'。图片选项同样返回对应字母，不要返回图片编号、解释或计算值。'
+	);
 }
 
 function isChoiceLetterInRange(letter: string, optionCount: number) {
@@ -903,19 +919,11 @@ function isChoiceLetterInRange(letter: string, optionCount: number) {
 	return index >= 0 && index < optionCount;
 }
 
-function normalizeCustomPrompt(prompt: string) {
-	const customPrompt = String(prompt || '').trim();
-	if (!customPrompt || customPrompt === DEFAULT_AI_PROMPT || customPrompt === LEGACY_DEFAULT_AI_PROMPT) {
-		return '';
-	}
-	return customPrompt;
-}
-
 function formatLineOptions(groups: AILineOptionGroup[]) {
-	const lines = ['下拉框可选项：'];
+	const lines = ['分组可选项（按组顺序返回每组的 value/data 值，以 # 分隔）：'];
 	for (const group of groups) {
 		lines.push(
-			`${group.index + 1}:` +
+			`${group.index + 1}: ${group.title || ''}\n` +
 				group.options.map((option) => `${compactPromptText(option.value)}=${compactPromptText(option.text)}`).join(';')
 		);
 	}
@@ -923,7 +931,9 @@ function formatLineOptions(groups: AILineOptionGroup[]) {
 }
 
 function compactPromptText(text: string) {
-	return String(text || '').replace(/\s+/g, ' ').trim();
+	return String(text || '')
+		.replace(/\s+/g, ' ')
+		.trim();
 }
 
 function replaceImageUrlsWithMarkers(text: string, imageUrls: string[]) {
@@ -938,63 +948,28 @@ function replaceImageUrlsWithMarkers(text: string, imageUrls: string[]) {
 }
 
 function createImageMarkerHint(count: number) {
-	return count === 1 ? '图片：[图片1] 已随消息附上。' : `图片：${Array.from({ length: count }, (_, i) => `[图片${i + 1}]`).join('、')} 已随消息附上。`;
+	return count === 1
+		? '图片：[图片1] 已随消息附上。'
+		: `图片：${Array.from({ length: count }, (_, i) => `[图片${i + 1}]`).join('、')} 已随消息附上。`;
 }
 
-function normalizeLineAnswer(answer: string, lineOptions?: AILineOptionGroup[]): string {
-	const values = lineOptions?.map((group) => group.options.map((option) => option.value).filter(Boolean)) || [];
-	const allowedValues = new Set(values.flat());
-	const answerText = answer
-		.replace(/^答案[:：]\s*/g, '')
-		.replace(/^连线[:：]\s*/g, '')
-		.trim();
-
-	const splitAnswers = answerText
-		.replace(/[，、,；;|]+/g, '#')
-		.replace(/\s+#\s+/g, '#')
-		.replace(/#+/g, '#')
-		.replace(/^#|#$/g, '')
-		.split('#')
-		.map((item) => normalizeLineAnswerToken(item, allowedValues))
-		.filter(Boolean);
-	if (splitAnswers.length >= values.length && values.length > 0) {
-		return splitAnswers.slice(0, values.length).join('#');
-	}
-
-	const pairTokens = Array.from(answerText.matchAll(/\(([A-Za-z0-9_-]+)\s*[-—–~:：>]\s*([A-Za-z0-9_-]+)\)/g))
-		.map((match) => normalizeLineAnswerToken(match[1], allowedValues) || normalizeLineAnswerToken(match[2], allowedValues))
-		.filter(Boolean);
-	if (pairTokens.length) {
-		return pairTokens.join('#');
-	}
-
-	const json = parseJSONLike(answerText);
+function normalizeLineAnswer(answer: string, groups?: AILineOptionGroup[]): string {
+	const text = answer.replace(/^(?:答案|连线)[:：]\s*/, '').trim();
+	if (!groups?.length) return text;
+	const valid = (tokens: string[]) =>
+		tokens.length === groups.length &&
+		tokens.every((token, index) => groups[index].options.some((option) => option.value === token));
+	const tokens = text.split(/[#，、,；;|\n]+/).map((value) => value.trim());
+	if (valid(tokens)) return tokens.join('#');
+	const json = parseJSONLike(text);
 	if (json) {
 		const picked = pickAnswerFromObject(json);
-		if (picked && picked !== answerText) {
-			return normalizeLineAnswer(picked, lineOptions);
-		}
+		if (picked && picked !== text) return normalizeLineAnswer(picked, groups);
 	}
-
-	if (allowedValues.size) {
-		const tokens = answerText.match(/[A-Za-z0-9_-]+/g) || [];
-		const matchedValues = tokens.map((token) => normalizeLineAnswerToken(token, allowedValues)).filter(Boolean);
-		if (matchedValues.length) {
-			return matchedValues.slice(0, values.length || matchedValues.length).join('#');
-		}
-	}
-
-	return answerText;
-}
-
-function normalizeLineAnswerToken(token: string, allowedValues: Set<string>) {
-	const clean = token.trim().replace(/^[({[<]+|[)}\]>]+$/g, '');
-	if (!allowedValues.size || allowedValues.has(clean)) {
-		return clean;
-	}
-
-	const lower = clean.toLowerCase();
-	return Array.from(allowedValues).find((value) => value.toLowerCase() === lower) || '';
+	const pairs = Array.from(text.matchAll(/\(?[A-Za-z0-9_-]+\s*[-—–~:：>]\s*([A-Za-z0-9_-]+)\)?/g)).map(
+		(match) => match[1]
+	);
+	return valid(pairs) ? pairs.join('#') : '';
 }
 
 function resolveTokenUsage(response: any) {
@@ -1016,7 +991,10 @@ function mergeTokenUsage(a: ReturnType<typeof resolveTokenUsage>, b: ReturnType<
 function parseJSONLike(content: string) {
 	const candidates = [
 		content,
-		content.replace(/^```(?:json)?/i, '').replace(/```$/i, '').trim(),
+		content
+			.replace(/^```(?:json)?/i, '')
+			.replace(/```$/i, '')
+			.trim(),
 		content.slice(content.indexOf('{'), content.lastIndexOf('}') + 1)
 	].filter(Boolean);
 
@@ -1035,9 +1013,13 @@ function resolveHomepage(url: string) {
 	}
 }
 
-function resolveAIProvider(apiUrl: string, model = ''): AIProvider {
-	const text = `${apiUrl} ${model}`.toLowerCase();
-	return text.includes('anthropic') || text.includes('claude') ? 'anthropic' : 'openai';
+function resolveAIProvider(apiUrl: string, _model = ''): AIProvider {
+	const url = new URL(apiUrl);
+	const path = url.pathname.replace(/\/+$/, '').toLowerCase();
+	if (path.endsWith('/chat/completions')) return 'openai';
+	if (path.endsWith('/messages') || /(^|\/)anthropic(\/|$)/.test(path) || /(^|\.)anthropic\.com$/i.test(url.hostname))
+		return 'anthropic';
+	return 'openai';
 }
 
 function createAIHeaders(provider: AIProvider, apiKey: string) {
@@ -1059,7 +1041,7 @@ function createAIRequestData(
 	type: AIQuestionPayload['type'],
 	userMessageContent: any
 ) {
-	const system = createSystemPrompt(opts.aiPrompt, type, opts.aiShowSolution);
+	const system = createSystemPrompt(type, opts.aiShowSolution);
 	if (provider === 'anthropic') {
 		return {
 			model: opts.aiModel,
@@ -1115,7 +1097,9 @@ function createUserMessageContent(provider: AIProvider, userPrompt: string, imag
 		{ type: 'text', text: userPrompt },
 		...images.map((image) => ({
 			type: 'image_url',
-			image_url: { url: image.dataUrl || createImageDataURL(image.mediaType || inferImageMediaType(image.url), image.base64 || '') }
+			image_url: {
+				url: image.dataUrl || createImageDataURL(image.mediaType || inferImageMediaType(image.url), image.base64 || '')
+			}
 		}))
 	];
 }
@@ -1344,7 +1328,7 @@ function resolveChatCompletionsURL(apiUrl: string) {
 	return url.toString();
 }
 
-function parseModelInfos(response: any): AIModelInfo[] {
+export function parseModelInfos(response: any): AIModelInfo[] {
 	const rawModels = Array.isArray(response)
 		? response
 		: Array.isArray(response?.data)
@@ -1363,7 +1347,7 @@ function parseModelInfos(response: any): AIModelInfo[] {
 			}
 			return {
 				id,
-				supportsVision: modelInfoSupportsVision(item, id)
+				supportsVision: modelSupportsImages(item)
 			};
 		})
 		.filter(Boolean);
@@ -1371,38 +1355,6 @@ function parseModelInfos(response: any): AIModelInfo[] {
 	return Array.from(new Map(models.map((model) => [model!.id, model!])).values()).sort((a, b) =>
 		a.id.localeCompare(b.id)
 	);
-}
-
-function modelInfoSupportsVision(item: any, modelName: string) {
-	if (typeof item === 'string') {
-		return modelNameLooksVision(modelName);
-	}
-
-	const fields = [
-		item?.capabilities,
-		item?.capability,
-		item?.modalities,
-		item?.input_modalities,
-		item?.inputModalities,
-		item?.features,
-		item?.supported_features,
-		item?.supportedFeatures,
-		item?.tags,
-		item?.metadata,
-		item?.permission,
-		item?.permissions
-	];
-	const text = fields.map(stringifyCompact).join(' ').toLowerCase();
-
-	if (/(vision|visual|image|images|image_url|multimodal|multi-modal|vl|mm|ocr)/i.test(text)) {
-		return true;
-	}
-
-	if (/(text-only|text_only|text only|no vision|without vision)/i.test(text)) {
-		return false;
-	}
-
-	return modelNameLooksVision(modelName);
 }
 
 function stringifyCompact(value: any): string {
@@ -1419,32 +1371,137 @@ function stringifyCompact(value: any): string {
 	}
 }
 
-function parseVisionModelList(value: string | undefined) {
-	return String(value || '')
-		.split('\n')
-		.map((item) => item.trim())
-		.filter(Boolean);
+/** Explicit, tiny visual probe. No question, account or course data is sent. */
+export async function probeVisionModel(opts: AIAnswererOptions): Promise<string> {
+	if (!isAIAnswererReady(opts)) throw new Error('请先填写接口地址、API Key 和模型。');
+	const bytes = new Uint32Array(1);
+	crypto.getRandomValues(bytes);
+	const code = String(1000 + (bytes[0] % 9000));
+	const canvas = document.createElement('canvas');
+	canvas.width = 240;
+	canvas.height = 100;
+	const context = canvas.getContext('2d');
+	if (!context) throw new Error('浏览器不支持生成检测图片。');
+	context.fillStyle = '#ffffff';
+	context.fillRect(0, 0, 240, 100);
+	context.fillStyle = '#111111';
+	context.font = 'bold 56px sans-serif';
+	context.fillText(code, 30, 72);
+	const infos = await queryAIAnswerer(
+		{ ...opts, aiVisionMode: 'support', aiShowSolution: false, aiMaxTokens: 128, aiTemperature: 0 },
+		{
+			title: '请读出图片中的四位数字。只输出 JSON，例如 {"answer":"数字","answers":["数字"]}。',
+			type: 'unknown',
+			hasImage: true,
+			imageUrls: [canvas.toDataURL('image/png')]
+		},
+		{ retryEmptyContent: false }
+	);
+	const info = infos[0];
+	if (info?.results[0]?.answer.trim() === code) {
+		rememberVisionCapability(opts, 'supported', 'probe');
+		return '检测通过：模型正确读出了测试图片。';
+	}
+	if (isVisionUnsupportedError(info?.error || '')) {
+		rememberVisionCapability(opts, 'unsupported', 'probe');
+		return '接口明确不支持图片输入，请更换模型。';
+	}
+	rememberVisionCapability(opts, 'unknown', 'probe');
+	return info?.error ? '检测未完成：' + info.error : '未能正确识别测试图片，能力仍为未知；请检查接口或手动设置。';
 }
 
-function modelNameLooksVision(modelName: string) {
-	const name = modelName.toLowerCase();
-	if (/(vision|visual|(^|[-_./])vl($|[-_./\d])|glm-4v|qwen[-_.]?vl|qvq|llava|minicpm[-_.]?v|gemini|gpt[-_.]?4o|gpt[-_.]?4\.?1|gpt[-_.]?5|gpt5|(^|[-_./])o3($|[-_./])|(^|[-_./])o4($|[-_./])|claude[-_.]?3\.?5|claude[-_.]?3\.?7|claude[-_.]?4)/i.test(name)) {
-		return true;
-	}
+/** Web mode intentionally has no automatic retry or API credential access. */
+async function queryWebAnswerer(opts: AIAnswererOptions, question: AIQuestionPayload): Promise<SearchInformation[]> {
+	const name = 'DeepSeek 网页（实验）',
+		homepage = 'https://chat.deepseek.com/';
 
-	const textOnlyHints = [
-		'deepseek',
-		'claude-3-haiku',
-		'claude-3-sonnet',
-		'claude-3-opus',
-		'embedding',
-		'embed',
-		'rerank',
-		'whisper',
-		'tts'
-	];
-	if (textOnlyHints.some((hint) => name.includes(hint))) {
-		return false;
+	try {
+		const imageUrls = Array.from(new Set((question.imageUrls || []).map((url) => url.trim()).filter(Boolean)));
+		if (question.unresolvedImageCount || (question.hasImage && !imageUrls.length))
+			return [
+				{
+					name,
+					homepage,
+					results: [],
+					error: '题干或选项中有图片未能读取地址，已跳过，未发送到网页。',
+					data: { provider: 'deepseek-web', skipped: true, reason: 'image_download_failed' }
+				}
+			];
+		if (!question.title.trim() && !imageUrls.length) throw new Error('题目为空。');
+		const inputs = await resolveAIImageInputs(imageUrls);
+		if (inputs.some((image) => !image.dataUrl))
+			return [
+				{
+					name,
+					homepage,
+					results: [],
+					error: '题干或选项图片下载失败，已跳过，未发送残缺题目。',
+					data: { provider: 'deepseek-web', skipped: true, reason: 'image_download_failed' }
+				}
+			];
+		const images = inputs.map((image, index) => ({
+			name: 'xth-image-' + (index + 1) + '.' + image.mediaType!.split('/')[1],
+			dataUrl: image.dataUrl!
+		}));
+		const options = (Array.isArray(question.options) ? question.options : question.options?.split('\n') || []).map(
+			(option) => replaceImageUrlsWithMarkers(option, imageUrls) || '（空选项）'
+		);
+		const prompt = [
+			createSystemPrompt(question.type, opts.aiShowSolution),
+			'这是独立题目，请勿引用此前题目。',
+			'题型：' + getQuestionTypeLabel(question.type),
+			createChoiceOutputHint(question.type, options),
+			'题目：',
+			replaceImageUrlsWithMarkers(question.title, imageUrls) || '见图片',
+			imageUrls.length
+				? createImageMarkerHint(imageUrls.length) +
+				  '\n附件文件名 xth-image-N 对应图片 N，请同时查看题干和所有选项图片。'
+				: '',
+			isLineQuestion(question.type) && question.lineOptions?.length
+				? replaceImageUrlsWithMarkers(formatLineOptions(question.lineOptions), imageUrls)
+				: options.map((option, index) => String.fromCharCode(65 + index) + '. ' + option).join('\n'),
+			opts.aiShowSolution ? '可在 solution 字段简要说明。' : 'solution 字段请保持空字符串。'
+		]
+			.filter(Boolean)
+			.join('\n');
+		const rawContent = await requestWebAnswer(prompt, opts.aiAnswerTimeout, images, opts.webActivityId);
+		const answer = normalizeAnswerByQuestionType(
+			resolveAIAnswer(rawContent),
+			question.type,
+			question.lineOptions,
+			options
+		);
+		const solution = normalizeAISolution(resolveAISolution(rawContent, {}));
+		return [
+			{
+				name,
+				homepage,
+				results: answer
+					? [
+							{
+								question: question.title,
+								answer,
+								extra_data: {
+									ai: true,
+									raw_content: rawContent,
+									parsed_answer: answer,
+									solution,
+									usage_unavailable: true
+								}
+							}
+					  ]
+					: [],
+				data: {
+					provider: 'deepseek-web',
+					raw_content: rawContent,
+					parsed_answer: answer,
+					solution,
+					usage_unavailable: true
+				},
+				error: answer ? undefined : '网页答案不能匹配本题格式，未填写且不会自动重复请求。'
+			}
+		];
+	} catch (error) {
+		return [{ name, homepage, results: [], error: normalizeErrorMessage(error), data: { provider: 'deepseek-web' } }];
 	}
-	return false;
 }

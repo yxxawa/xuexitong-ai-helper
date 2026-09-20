@@ -1,6 +1,14 @@
 /* eslint-disable no-undef */
 /// <reference path="./global.d.ts" />
 
+// DeepSeek only runs the opt-in receiver in a dedicated tab, never the learning-platform UI.
+if (location.hostname === 'chat.deepseek.com') {
+	XuexitongAIHelper.startDeepSeekBridge();
+	return;
+}
+// 仅在学习通主域及其子域运行；AI 接口连接权限与网页作用域分开。
+if (!/(^|\.)chaoxing\.com$/i.test(location.hostname)) return;
+
 // 环境检测
 if (
 	[
@@ -48,15 +56,16 @@ const infos = GM_info;
 	};
 
 	// 运行脚本
-	const run = () => start({
-		projects: projects,
-		renderConfig: {
-			renderScript: RenderScript,
-			styles: [STYLE],
-			defaultPanelName: CommonProject.scripts.guide.namespace,
-			title: `学习通AI辅助插件-${infos.script.version}`
-		}
-	});
+	const run = () =>
+		start({
+			projects: projects,
+			renderConfig: {
+				renderScript: RenderScript,
+				styles: [STYLE],
+				defaultPanelName: CommonProject.scripts.guide.namespace,
+				title: `学习通AI辅助插件-${infos.script.version}`
+			}
+		});
 
 	if (typeof GM_getTab !== 'undefined' && typeof GM_saveTab !== 'undefined') {
 		GM_getTab((tab = {}) => {

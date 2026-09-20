@@ -1,6 +1,14 @@
 /* eslint-disable no-undef */
 /// <reference path="./global.d.ts" />
 
+// DeepSeek only runs the opt-in receiver in a dedicated tab, never the learning-platform UI.
+if (location.hostname === 'chat.deepseek.com') {
+	XuexitongAIHelper.startDeepSeekBridge();
+	return;
+}
+// 仅在学习通主域及其子域运行；AI 接口连接权限与网页作用域分开。
+if (!/(^|\.)chaoxing\.com$/i.test(location.hostname)) return;
+
 // 环境检测
 if (
 	[

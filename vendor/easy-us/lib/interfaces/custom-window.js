@@ -44,6 +44,10 @@ class CustomWindow {
         this.inputStoreProvider = inputStoreProvider;
         this.config = config;
         this.navItems = [];
+        this.navigationRevision = 0;
+        this.pendingNavigation = 0;
+        this.navigationSave = Promise.resolve();
+        this.activePanelName = undefined;
         /** 兼容低版本浏览器 */
         handleLowLevelBrowser();
         /** 加载自定义元素 */
@@ -128,9 +132,13 @@ class CustomWindow {
         // 初始化面板可视状态
         this.setVisual(config.store.getVisual());
         (() => __awaiter(this, void 0, void 0, function* () {
+            const revision = this.navigationRevision;
             const urls = yield config.store.getRenderURLs();
             const currentPanelName = yield config.store.getCurrentPanelName();
-            yield this.rerender(this.defaults.urls(urls), this.defaults.panelName(currentPanelName));
+            if (revision === this.navigationRevision) {
+                this.activePanelName = this.defaults.panelName(currentPanelName);
+                yield this.rerender(this.defaults.urls(urls), this.activePanelName);
+            }
         }))();
         // 初始化跨域模态框系统
         initCorsModalSystem();
@@ -188,7 +196,8 @@ class CustomWindow {
         this.navItems = navItems;
         this.container.sidebar.replaceChildren(...navItems.map((item) => {
             const active = currentScript && item.script && isSameScript(item.script, currentScript);
-            const btn = (0, utils_1.h)('button', { className: active ? 'xth-shell-nav-item active' : 'xth-shell-nav-item' }, item.label);
+            const btn = (0, utils_1.h)('button', { type: 'button', className: active ? 'xth-shell-nav-item active' : 'xth-shell-nav-item' }, item.label);
+            if (active) btn.setAttribute('aria-current', 'page');
             btn.onclick = () => __awaiter(this, void 0, void 0, function* () {
                 if (item.script) {
                     yield this.pin(item.script);
@@ -250,7 +259,7 @@ class CustomWindow {
         ].filter((item) => item.script);
     }
     setFontSize(fontsize) {
-        this.container.style.font = `${fontsize}px  Menlo, Monaco, Consolas, 'Courier New', monospace`;
+        this.container.style.font = `${fontsize}px system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif`;
     }
     setVisual(value) {
         this.container.className = '';
@@ -276,14 +285,22 @@ class CustomWindow {
     }
     changeRenderURLs(urls) {
         return __awaiter(this, void 0, void 0, function* () {
-            const currentPanelName = yield this.config.store.getCurrentPanelName();
-            yield this.rerender(this.defaults.urls(urls), this.defaults.panelName(currentPanelName));
+            const revision = ++this.navigationRevision;
+            const name = this.activePanelName || (yield this.config.store.getCurrentPanelName());
+            if (revision !== this.navigationRevision) return;
+            this.activePanelName = this.defaults.panelName(name);
+            yield this.rerender(this.defaults.urls(urls), this.activePanelName);
         });
     }
-    changePanel(currentPanelName) {
+    changePanel(currentPanelName, force = false) {
         return __awaiter(this, void 0, void 0, function* () {
-            const urls = (yield this.config.store.getRenderURLs()) || [location.href];
-            yield this.rerender(this.defaults.urls(urls), this.defaults.panelName(currentPanelName));
+            const name = this.defaults.panelName(currentPanelName);
+            if (!force && (this.pendingNavigation > 0 || name === this.activePanelName)) return;
+            this.activePanelName = name;
+            const revision = ++this.navigationRevision;
+            const urls = yield this.config.store.getRenderURLs();
+            if (revision !== this.navigationRevision) return;
+            yield this.rerender(this.defaults.urls(urls), name);
         });
     }
     /**
@@ -292,15 +309,14 @@ class CustomWindow {
      */
     pin(script) {
         return __awaiter(this, void 0, void 0, function* () {
-            if (script.projectName) {
-                yield this.config.store.setCurrentPanelName(`${script.projectName}-${script.name}`);
-            }
-            else if (script.namespace) {
-                yield this.config.store.setCurrentPanelName(script.namespace);
-            }
-            else {
-                console.warn('[ERROR]', `${script.name} 无法置顶， projectName 与 namespace 都为 undefined`);
-            }
+            const name = script.namespace || (script.projectName && script.projectName + '-' + script.name);
+            if (!name) return;
+            // Render locally immediately. Navigation must not depend on a userscript manager's storage callback.
+            this.pendingNavigation++;
+            const rendering = this.changePanel(name, true);
+            this.navigationSave = this.navigationSave.catch(() => {}).then(() => this.config.store.setCurrentPanelName(name));
+            try { yield this.navigationSave; }
+            finally { this.pendingNavigation--; yield rendering; }
         });
     }
     /**
@@ -371,7 +387,18 @@ class CustomWindow {
      */
     mount(parent) {
         // 随机位置插入操作面板到页面
-        parent.children[utils_1.$.random(0, parent.children.length - 1)].after(this.wrapper);
+        const child = parent.children[utils_1.$.random(0, parent.children.length - 1)];
+        if (child) child.after(this.wrapper);
+        else parent.append(this.wrapper);
+        const fitInViewport = () => {
+            const rect = this.container.getBoundingClientRect();
+            const x = Math.max(0, Math.min(rect.left, window.innerWidth - rect.width));
+            const y = Math.max(0, Math.min(rect.top, window.innerHeight - Math.min(rect.height, window.innerHeight)));
+            this.container.style.left = x + 'px'; this.container.style.top = y + 'px';
+            this.config.store.setPosition(x, y);
+        };
+        requestAnimationFrame(fitInViewport);
+        window.addEventListener('resize', fitInViewport);
     }
 }
 exports.CustomWindow = CustomWindow;

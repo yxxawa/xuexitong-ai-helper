@@ -277,7 +277,7 @@ export function createDefaultQuestionResolver<E>(
 						}
 					}
 
-					return { finish: true, option };
+					return { finish: Boolean(option), option };
 				}
 
 				function matches(target: string, options: string[]) {

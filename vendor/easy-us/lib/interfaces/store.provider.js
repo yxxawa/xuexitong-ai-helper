@@ -88,15 +88,19 @@ exports.MemoryStoreProvider = MemoryStoreProvider;
  */
 class GMStoreProvider {
     constructor() {
-        // 当页面首次加载时删除之前的监听数据
-        if (self === top && typeof globalThis.GM_listValues !== 'undefined') {
-            for (const val of GM_listValues()) {
-                if (val.startsWith('_tab_change_')) {
-                    GM_deleteValue(val);
-                }
-            }
-        }
+        // Never delete other tabs' signals on startup. Doing so navigated their windows
+        // back to Home and detached pending answer results (including on bridge reloads).
+        this.tabUid = undefined;
+        if (typeof GM_getTab === 'function') GM_getTab((tab = {}) => {
+            this.tabUid = Reflect.get(tab, const_1.$const.TAB_UID) || this.tabUid;
+        });
+        if (self === top && typeof window !== 'undefined') window.addEventListener('pagehide', (event) => {
+            if (event.persisted || !this.tabUid || typeof GM_listValues !== 'function') return;
+            const prefix = '_tab_change_' + this.tabUid + '_';
+            for (const key of GM_listValues()) if (key.startsWith(prefix)) GM_deleteValue(key);
+        });
     }
+
     /** 获取本地能够触发 tab 监听的key */
     getTabChangeHandleKey(tabUid, key) {
         return `_tab_change_${tabUid}_${key}`;
@@ -122,6 +126,7 @@ class GMStoreProvider {
         return new Promise((resolve, reject) => {
             GM_getTab((tab = {}) => {
                 Reflect.set(tab, key, value);
+                if (key === const_1.$const.TAB_UID) this.tabUid = value;
                 GM_saveTab(tab);
                 this.set(this.getTabChangeHandleKey(Reflect.get(tab, const_1.$const.TAB_UID), key), value);
                 resolve();

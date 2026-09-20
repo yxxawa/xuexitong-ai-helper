@@ -1,23 +1,11 @@
+import { questionDisplayHTML } from '../utils/question';
 import { $ } from '@xuexitong-ai-helper/core/src/utils/common';
 import { splitAnswer } from '@xuexitong-ai-helper/core/src/core/worker/utils';
 import type { QuestionTypes, SimplifyWorkResult } from '@xuexitong-ai-helper/core/src/core/worker/interface';
 import { $modal, $ui, h } from 'easy-us';
 import { createQuestionTitleExtra } from '../utils';
 
-/**
- * 判断是否有图片链接，如果有则使用 <img> 标签包裹，但如果已经被 <img> 包裹则不处理
- */
-const transformImgLinkOfQuestion = (question: string) => {
-	// 防止题目中包含 img 标签元素，所以先统一吧 img 标签替换成链接
-	const dom = new DOMParser().parseFromString(question, 'text/html');
-	for (const img of Array.from(dom.querySelectorAll('img'))) {
-		img.replaceWith(img.src);
-	}
-	// 最后将所有图片链接替换成 img 标签
-	return dom.documentElement.innerHTML.replace(/https?:\/\/.+?\.(png|jpg|jpeg|gif)/g, (img) => {
-		return `<img src="${img}" />`;
-	});
-};
+const transformImgLinkOfQuestion = questionDisplayHTML;
 
 /**
  * 搜索结果元素
@@ -133,7 +121,7 @@ export class SearchInfosElement extends HTMLElement {
 								extra_data.tags.push({
 									text: 'AI',
 									title: '此答案由 AI 生成，仅供参考',
-									color: 'blue'
+									color: 'var(--xth-accent, blue)'
 								});
 							}
 
@@ -144,7 +132,7 @@ export class SearchInfosElement extends HTMLElement {
 									title: `本题 AI token 消耗：${extra_data.token_usage.total_tokens}\n输入：${
 										extra_data.token_usage.prompt_tokens || 0
 									}\n输出：${extra_data.token_usage.completion_tokens || 0}`,
-									color: 'gray'
+									color: 'var(--xth-muted, gray)'
 								});
 							}
 
@@ -154,13 +142,15 @@ export class SearchInfosElement extends HTMLElement {
 									text: '答案缓存',
 									title:
 										'此答案来自本地缓存，由 AI 搜索后保存在本地。\n- 清空缓存：请前往工具-答案缓存\n- 关闭缓存：请前往AI设置-答案缓存',
-									color: 'gray'
+									color: 'var(--xth-muted, gray)'
 								});
 							}
 
 							return h('div', { className: 'search-result' }, [
 								/** 题目 */
-								...(this.hideResultQuestion ? [] : [h('div', { className: 'question' }, [h('span', { innerHTML: title })])]),
+								...(this.hideResultQuestion
+									? []
+									: [h('div', { className: 'question' }, [h('span', { innerHTML: title })])]),
 								/** 答案 */
 								h('div', { className: 'answer' }, [
 									h('span', '答案：'),
@@ -273,8 +263,8 @@ const rawBlockStyle = {
 	maxHeight: '260px',
 	overflow: 'auto',
 	padding: '8px',
-	background: '#f7f7f7',
-	border: '1px solid #ddd',
+	background: 'var(--xth-surface, #f7f7f7)',
+	border: '1px solid var(--xth-border, #ddd)',
 	borderRadius: '4px'
 };
 
@@ -317,7 +307,13 @@ function extractAITextFromResponse(response: any) {
 			.filter(Boolean)
 			.join('\n');
 	}
-	return response?.choices?.[0]?.message?.content || response?.choices?.[0]?.text || response?.answer || response?.data?.answer || '';
+	return (
+		response?.choices?.[0]?.message?.content ||
+		response?.choices?.[0]?.text ||
+		response?.answer ||
+		response?.data?.answer ||
+		''
+	);
 }
 
 function compactRawOutput(value: any) {

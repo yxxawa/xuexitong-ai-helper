@@ -1,3 +1,12 @@
+import { acquireWebActivity } from '../utils/web-activity';
+import { fillTextAnswer, isOptionChecked, clearOtherMultipleOptions, fillGroupedChoices } from '../utils/answer-input';
+import { runQuestionPages } from '../utils/pagination';
+import {
+	inspectQuestionImages,
+	questionElementText,
+	questionOptionText,
+	collectGroupedOptions
+} from '../utils/question';
 /** global Ext videojs getTeacherAjax jobs */
 
 import {
@@ -90,32 +99,8 @@ type Job = {
 	func: { (): Promise<void> } | undefined;
 };
 export const CXProject = Project.create({
-	name: '课程平台',
-	domains: [
-		'chaoxing.com',
-		'edu.cn',
-		'org.cn',
-		// 学银在线
-		'xueyinonline.com',
-		/** 其他域名 */
-		'hnsyu.net',
-		'qutjxjy.cn',
-		'ynny.cn',
-		'hnvist.cn',
-		'fjlecb.cn',
-		'gdhkmooc.com',
-		'cugbonline.cn',
-		'zjelib.cn',
-		'cqrspx.cn',
-		'neauce.com',
-		'zhihui-yun.com',
-		'cqie.cn',
-		'ccqmxx.com',
-		'jxgmxy.com',
-		'jnzyjsxy.cn',
-		// 超星学习通PPT，2025下半年更新的PTT图书新域名
-		'sslibrary.com'
-	],
+	name: '学习通',
+	domains: ['chaoxing.com'],
 	scripts: {
 		/**
 		 * 创建超星独立脚本防止污染其他脚本环境
@@ -173,7 +158,6 @@ export const CXProject = Project.create({
 					$message.success('已进入学习页面，请等待自动运行...');
 					return;
 				}
-				$message.info('请进入课程、作业或考试页面，脚本会自动运行。');
 			}
 		}),
 		study: new Script({
@@ -517,8 +501,7 @@ export const CXProject = Project.create({
 			async oncomplete() {
 				if (top === window) {
 					$message.warn({
-						content:
-							'当前页面版本不支持，即将切换到新版页面。如有其他第三方插件，请关闭后再使用。',
+						content: '当前页面版本不支持，即将切换到新版页面。如有其他第三方插件，请关闭后再使用。',
 						duration: 0
 					});
 					// 跳转到最新版本的超星
@@ -750,7 +733,9 @@ function workOrExam(
 		answerMatchMode,
 		preview_mode,
 		questionIndexes,
-		appendOnly
+		appendOnly,
+		webActivityId,
+		...providerConfig
 	}: CommonWorkOptions & {
 		// 整卷预览模式
 		preview_mode: boolean;
@@ -765,29 +750,19 @@ function workOrExam(
 	}
 
 	// 处理作业和考试题目的方法
-	const workOrExamQuestionTitleTransform = (titles: (HTMLElement | undefined)[]) => {
-		const optimizationTitle = titles
-			.map((titleElement) => {
-				if (titleElement) {
-					const titleCloneEl = titleElement.cloneNode(true) as HTMLElement;
-					const childNodes = titleCloneEl.childNodes;
-					// 删除序号
-					childNodes[0].remove();
-					// 删除题型
-					childNodes[0].remove();
-					// 显示图片链接在题目中
-					return optimizationElementWithImage(titleCloneEl, true).innerText;
-				}
-				return '';
-			})
-			.join(',');
-
-		return removeRedundantWords(
-			StringUtils.of(optimizationTitle).nowrap(' ').nospace().toString().trim(),
-			redundanceWordsText.split('\n')
-		);
+	const workOrExamQuestionTitleTransform = (
+		titles: (HTMLElement | undefined)[],
+		imageUrls = inspectQuestionImages(titles).imageUrls
+	) => {
+		const title = titles
+			.map((element) => (element ? questionElementText(element, imageUrls) : ''))
+			.join(' ')
+			.replace(/^\s*\d+[.、．]\s*/, '')
+			.replace(/^[（(【](?:单选题|多选题|判断题|填空题|简答题|名词解释|阅读理解|完形填空)[^）)】]*[）)】]\s*/, '');
+		return removeRedundantWords(title, redundanceWordsText.split('\n')).trim();
 	};
 
+	let pageResultsBefore: import('@xuexitong-ai-helper/core/src/core/worker/interface').SimplifyWorkResult[] = [];
 	/** 新建答题器 */
 	const worker = new CourseWorker({
 		root: '.questionLi',
@@ -820,25 +795,47 @@ function workOrExam(
 		answerer: (elements, ctx) => {
 			if (elements.title) {
 				// 处理作业和考试题目
-				const title = workOrExamQuestionTitleTransform(elements.title);
+				const images = inspectQuestionImages([ctx.root]);
+				const title = workOrExamQuestionTitleTransform(elements.title, images.imageUrls);
 				if (title) {
-					const questionType = resolveQuestionType(elements, ctx, title) || 'unknown';
+					const questionType =
+						resolveQuestionType(elements, ctx, elements.title.map((el) => el?.textContent || '').join(' ')) ||
+						'unknown';
+					if (['single', 'multiple', 'judgement', 'completion'].includes(questionType))
+						ctx.type = questionType as typeof ctx.type;
+					if (questionType === 'unknown')
+						return [
+							{
+								name: 'AI做题',
+								results: [],
+								error: '无法识别本题题型，未发送请求；请手动核对。',
+								data: { skipped: true, reason: 'unknown_question_type' }
+							}
+						];
+					// The entire question is inspected, including pictures outside option text spans.
+					const { imageUrls } = images;
 					const options =
 						questionType === 'completion'
-							? ''
-							: ctx.elements.options.map((o) => optimizationElementWithImage(o, true).innerText).join('\n');
-					const lineOptions = questionType === 'line' ? collectLineOptionGroups(ctx.elements.lineSelectBox) : undefined;
-					const imageUrls = collectQuestionImageUrls(elements.title, ctx.elements.options);
-					return CommonProject.scripts.apps.methods.searchAnswerInCaches(
-						title,
-						{
-							type: questionType,
-							options,
-							lineOptions,
-							hasImage: imageUrls.length > 0,
-							imageUrls
-						}
-					);
+							? []
+							: ctx.elements.options.map((option) => questionOptionText(option, ctx.elements.options, imageUrls));
+					const lineOptions =
+						questionType === 'line'
+							? collectLineOptionGroups(ctx.elements.lineSelectBox, imageUrls)
+							: questionType === 'reader' || questionType === 'fill'
+							? collectGroupedOptions(
+									questionType === 'reader' ? ctx.elements.reading : ctx.elements.filling,
+									'span.saveSingleSelect[data]',
+									imageUrls
+							  )
+							: undefined;
+					return CommonProject.scripts.apps.methods.searchAnswerInCaches(title, {
+						webActivityId,
+						providerConfig,
+						type: questionType,
+						options,
+						lineOptions,
+						...images
+					});
 				} else {
 					throw new Error('题目为空，请查看题目是否为空，或者忽略此题');
 				}
@@ -850,29 +847,24 @@ function workOrExam(
 		work: async (ctx) => {
 			const { elements, searchInfos } = ctx;
 			const typeInput = elements.type[0] as HTMLInputElement;
-			const type = getQuestionType(parseInt(typeInput.value));
+			const type = typeInput ? getQuestionType(parseInt(typeInput.value)) : resolveQuestionType(elements, ctx);
 
 			if (type && (type === 'completion' || type === 'multiple' || type === 'judgement' || type === 'single')) {
+				if (type === 'multiple') clearOtherMultipleOptions(elements.options, searchInfos[0]?.results[0]?.answer || '');
 				const resolver = createDefaultQuestionResolver(ctx)[type];
 				return await resolver(
 					searchInfos,
 					elements.options.map((option) => optimizationElementWithImage(option)),
 					async (type, answer, option) => {
+						if (ctx.isCancelled?.()) throw new Error('答题已取消');
 						// 如果存在已经选择的选项
 						if (type === 'judgement' || type === 'single' || type === 'multiple') {
-							if (option?.parentElement && $$el('[class*="check_answer"]', option.parentElement).length === 0) {
+							if (!isOptionChecked(option)) {
 								option.click();
 								await $.sleep(500);
 							}
 						} else if (type === 'completion' && answer.trim()) {
-							const text = option?.querySelector('textarea');
-							const textareaFrame = option?.querySelector('iframe');
-							if (text) {
-								text.value = answer;
-							}
-							if (textareaFrame?.contentDocument) {
-								textareaFrame.contentDocument.body.innerHTML = answer;
-							}
+							fillTextAnswer(option, answer);
 							if (option?.parentElement?.parentElement) {
 								/** 如果存在保存按钮则点击 */
 								$el('[onclick*=saveQuestion]', option?.parentElement?.parentElement)?.click();
@@ -884,103 +876,90 @@ function workOrExam(
 			}
 			// 连线题自定义处理
 			else if (type && type === 'line') {
-				for (const answers of searchInfos.map((info) => info.results.map((res) => res.answer))) {
-					let ans = answers;
-					if (ans.length === 1) {
-						ans = splitAnswer(ans[0]);
-					}
-					if (ans.filter(Boolean).length !== 0 && elements.lineAnswerInput) {
-						//  选择答案
-						for (let index = 0; index < elements.lineSelectBox.length; index++) {
-							const box = elements.lineSelectBox[index];
-							if (ans[index]) {
-								$el(`li[data=${ans[index]}] a`, box)?.click();
-								await $.sleep(200);
-							}
-						}
-
-						return { finish: true };
+				for (const info of searchInfos) {
+					for (const result of info.results) {
+						const filled = await fillGroupedChoices(
+							result.answer,
+							elements.lineSelectBox,
+							'li[data]',
+							() => $.sleep(200),
+							ctx.isCancelled
+						);
+						if (filled.finish) return filled;
 					}
 				}
-
 				return { finish: false };
 			}
 			// 完形填空
 			else if (type && type === 'fill') {
-				return readerAndFillHandle(searchInfos, elements.filling);
+				return readerAndFillHandle(searchInfos, elements.filling, ctx.isCancelled);
 			}
 			// 阅读理解
 			else if (type && type === 'reader') {
-				return readerAndFillHandle(searchInfos, elements.reading);
+				return readerAndFillHandle(searchInfos, elements.reading, ctx.isCancelled);
 			}
 
 			return { finish: false };
 		},
 
-			/** 完成答题后 */
+		/** 完成答题后 */
 		async onResultsUpdate(current, currentIndex, res) {
-			// 非预览模式，直接追加，想要清楚只能手动清空
+			const simplified = simplifyWorkResult(res, (titles) => workOrExamQuestionTitleTransform(titles));
 			if (!preview_mode) {
-				if (current.result?.finish) {
-					await CommonProject.scripts.workResults.methods.appendResults(
-						simplifyWorkResult(res, workOrExamQuestionTitleTransform)
-					);
-					CommonProject.scripts.apps.methods.addQuestionCacheFromWorkResult(
-						simplifyWorkResult([current], workOrExamQuestionTitleTransform)
-					);
-				}
-				return;
-			}
-
-			const simplified = simplifyWorkResult(res, workOrExamQuestionTitleTransform);
-			if (appendOnly && questionIndexes?.length) {
+				const combined = [...pageResultsBefore, ...simplified];
+				await CommonProject.scripts.workResults.methods.setResults(combined);
+				CommonProject.scripts.workResults.methods.updateWorkStateByResults(combined);
+			} else if (appendOnly && questionIndexes?.length) {
 				const existed = (await CommonProject.scripts.workResults.methods.getResults()) || [];
-				const originalIndex = questionIndexes[currentIndex] ?? currentIndex;
-				existed[originalIndex] = simplified[currentIndex];
+				simplified.forEach((result, index) => {
+					existed[questionIndexes[index] ?? index] = result;
+				});
 				CommonProject.scripts.workResults.methods.setResults(existed);
 				CommonProject.scripts.workResults.methods.updateWorkStateByResults(existed);
 			} else {
 				CommonProject.scripts.workResults.methods.setResults(simplified);
 				CommonProject.scripts.workResults.methods.updateWorkStateByResults(res);
 			}
-			if (current.result?.finish) {
-				CommonProject.scripts.apps.methods.addQuestionCacheFromWorkResult(
-					simplifyWorkResult([current], workOrExamQuestionTitleTransform)
-				);
-			}
 		}
 	});
 
-	if (preview_mode) {
-		worker
-			.doWork({ questionIndexes })
-			.then(() => {
-				$message.info({ content: '作业/考试完成，请自行检查后保存或提交。', duration: 0 });
-				worker.emit('done');
-			})
-			.catch((err) => {
-				console.error(err);
-				$message.error('答题程序发生错误 : ' + err.message);
-			});
-	} else {
-		const getNextBtn = () => document.querySelector('[onclick="getTheNextQuestion(1)"]') as HTMLElement;
-		let next = getNextBtn();
-
-		(async () => {
-			while (next && worker.isClose === false) {
-				await worker.doWork({ enable_debug: false });
-				await $.sleep(1000);
-				next = getNextBtn();
-				next?.click();
-				await $.sleep(1000);
+	const run = async () => {
+		try {
+			if (preview_mode) await worker.doWork({ questionIndexes });
+			else {
+				await runQuestionPages({
+					closed: () => worker.isClose,
+					identity: () =>
+						Array.from(document.querySelectorAll<HTMLElement>('.questionLi'))
+							.map((root) =>
+								JSON.stringify([
+									root.id,
+									root.querySelector('h3')?.textContent,
+									Array.from(root.querySelectorAll<HTMLInputElement>('input[type="hidden"]'))
+										.filter((input) => /questionid|answertype|^type/i.test(input.name || input.id))
+										.map((input) => [input.name, input.id, input.value]),
+									Array.from(root.querySelectorAll('img')).map((img) => img.getAttribute('src'))
+								])
+							)
+							.join('|'),
+					answer: async () => {
+						pageResultsBefore = (await CommonProject.scripts.workResults.methods.getResults()) || [];
+						await worker.doWork();
+					},
+					next: () => document.querySelector<HTMLElement>('[onclick="getTheNextQuestion(1)"]'),
+					wait: (ms) => $.sleep(ms)
+				});
+				CommonProject.scripts.workResults.cfg.questionPositionSyncHandlerType = 'cx';
 			}
-
-			$message.success({ content: '作业/考试完成，请自行检查后保存或提交。', duration: 0 });
+			if (!worker.isClose) $message.info({ content: '作业/考试完成，请自行检查后保存或提交。', duration: 0 });
+		} catch (error) {
+			if (!worker.isClose)
+				$message.error('答题程序发生错误：' + (error instanceof Error ? error.message : String(error)));
+		} finally {
 			worker.emit('done');
-			// 搜索完成后才会同步答案与题目的显示，防止题目错乱
-			CommonProject.scripts.workResults.cfg.questionPositionSyncHandlerType = 'cx';
-		})();
-	}
+		}
+	};
+	void run();
 
 	return worker;
 }
@@ -1891,307 +1870,310 @@ const JobRunner = {
 	async chapter(
 		frame: HTMLIFrameElement,
 		{
-		upload,
-		thread,
-		period,
-		stopSecondWhenFinish,
-		redundanceWordsText,
-		answerSeparators,
-			answerMatchMode
+			upload,
+			thread,
+			period,
+			stopSecondWhenFinish,
+			redundanceWordsText,
+			answerSeparators,
+			answerMatchMode,
+			...providerConfig
 		}: CommonWorkOptions
 	) {
 		if (hasAnswerProvider(CommonProject.scripts.settings.methods.getWorkOptions()) === false) {
 			return aiConfigEmptyWarning(0);
 		}
 
-		console.info('开始章节测试');
-		const visual_state = CommonProject.scripts.render.cfg.visual;
+		const activity = providerConfig.aiProvider === 'deepseek-web' ? await acquireWebActivity('work') : undefined;
+		try {
+			console.info('开始章节测试');
+			const visual_state = CommonProject.scripts.render.cfg.visual;
 
-		const frameWindow = frame.contentWindow;
-		const { TiMu } = domSearchAll({ TiMu: '.TiMu' }, frameWindow!.document);
+			const frameWindow = frame.contentWindow;
+			const { TiMu } = domSearchAll({ TiMu: '.TiMu' }, frameWindow!.document);
 
-		// 最大化面板
-		CORSUtils.panelNormal();
-		CommonProject.scripts.workResults.methods.init();
-		// 固定显示答题结果面板
-		CORSUtils.pinWorkPanel();
+			// 最大化面板
+			CORSUtils.panelNormal();
+			CommonProject.scripts.workResults.methods.init();
+			// 固定显示答题结果面板
+			CORSUtils.pinWorkPanel();
 
-		const chapterTestTaskQuestionTitleTransform = (titles: (HTMLElement | undefined)[]) => {
-			const removed = removeRedundantWords(
-				titles.map((t) => (t ? optimizationElementWithImage(t, true).innerText : '')).join(','),
-				redundanceWordsText.split('\n')
-			);
+			const chapterTestTaskQuestionTitleTransform = (
+				titles: (HTMLElement | undefined)[],
+				imageUrls = inspectQuestionImages(titles).imageUrls
+			) => {
+				const removed = removeRedundantWords(
+					titles.map((t) => (t ? questionElementText(t, imageUrls) : '')).join(' '),
+					redundanceWordsText.split('\n')
+				);
 
-			return (
-				removed
-					.trim()
-					/** 超星旧版作业题目冗余数据 */
-					.replace(/^\d+[。、.]/, '')
-					.replace(/（\d+\.\d+分）/, '')
-					.replace(/\(..题, \d+?分\)/, '')
-					.replace(/\(..题, \d+\.\d+分\)/, '')
-					.replace(/[[(【（](..题|名词解释|完形填空|阅读理解)[\])】）]/, '')
-					.trim()
-			);
-		};
+				return (
+					removed
+						.trim()
+						/** 超星旧版作业题目冗余数据 */
+						.replace(/^\d+[。、.]/, '')
+						.replace(/（\d+\.\d+分）/, '')
+						.replace(/\(..题, \d+?分\)/, '')
+						.replace(/\(..题, \d+\.\d+分\)/, '')
+						.replace(/[[(【（](..题|名词解释|完形填空|阅读理解)[\])】）]/, '')
+						.trim()
+				);
+			};
 
-		/** 新建答题器 */
-		const worker = new CourseWorker({
-			root: TiMu,
-			elements: {
-				title: '.Zy_TItle .clearfix',
-				/**
-				 * 兼容各种选项
-				 *
-				 * ul li .after 单选多选
-				 * ul li label:not(.after) 判断题
-				 * ul li textarea 填空题
-				 */
-				options: 'ul li .after,ul li textarea,ul textarea,ul li label:not(.before)',
-				type: 'input[id^="answertype"]',
-				lineAnswerInput: '.line_answer input[name^=answer]',
-				lineSelectBox: '.line_answer_ct .selectBox '
-			},
-			thread: thread ?? 1,
-			requestPeriod: Math.max(0, Number(period || 0) * 1000),
-			answerSeparators: answerSeparators.split(',').map((s) => s.trim()),
-			answerMatchMode: answerMatchMode,
-			/** 默认搜题方法构造器 */
-			answerer: (elements, ctx) => {
-				const title = chapterTestTaskQuestionTitleTransform(elements.title);
-				if (title) {
-					const questionType = resolveQuestionType(elements, ctx, title) || 'unknown';
-					const options =
-						questionType === 'completion'
-							? ''
-							: ctx.elements.options.map((o) => optimizationElementWithImage(o, true).innerText).join('\n');
-					const lineOptions = questionType === 'line' ? collectLineOptionGroups(ctx.elements.lineSelectBox) : undefined;
-					const imageUrls = collectQuestionImageUrls(elements.title, ctx.elements.options);
+			/** 新建答题器 */
+			const worker = new CourseWorker({
+				root: TiMu,
+				elements: {
+					title: '.Zy_TItle .clearfix',
+					/**
+					 * 兼容各种选项
+					 *
+					 * ul li .after 单选多选
+					 * ul li label:not(.after) 判断题
+					 * ul li textarea 填空题
+					 */
+					options: 'ul li .after,ul li textarea,ul textarea,ul li label:not(.before)',
+					type: 'input[id^="answertype"]',
+					lineAnswerInput: '.line_answer input[name^=answer]',
+					lineSelectBox: '.line_answer_ct .selectBox '
+				},
+				thread: providerConfig.aiProvider === 'deepseek-web' ? 1 : thread ?? 1,
+				requestPeriod: Math.max(0, Number(period || 0) * 1000),
+				answerSeparators: answerSeparators.split(',').map((s) => s.trim()),
+				answerMatchMode: answerMatchMode,
+				/** 默认搜题方法构造器 */
+				answerer: (elements, ctx) => {
+					const images = inspectQuestionImages([ctx.root]);
+					const title = chapterTestTaskQuestionTitleTransform(elements.title, images.imageUrls);
+					if (title) {
+						const questionType =
+							resolveQuestionType(elements, ctx, elements.title.map((el) => el?.textContent || '').join(' ')) ||
+							'unknown';
+						if (['single', 'multiple', 'judgement', 'completion'].includes(questionType))
+							ctx.type = questionType as typeof ctx.type;
+						if (questionType === 'unknown')
+							return [
+								{
+									name: 'AI做题',
+									results: [],
+									error: '无法识别本题题型，未发送请求；请手动核对。',
+									data: { skipped: true, reason: 'unknown_question_type' }
+								}
+							];
+						// The entire question is inspected, including pictures outside option text spans.
+						const { imageUrls } = images;
+						const options =
+							questionType === 'completion'
+								? []
+								: ctx.elements.options.map((option) => questionOptionText(option, ctx.elements.options, imageUrls));
+						const lineOptions =
+							questionType === 'line' ? collectLineOptionGroups(ctx.elements.lineSelectBox, imageUrls) : undefined;
 
-					return CommonProject.scripts.apps.methods.searchAnswerInCaches(
-						title,
-						{
+						return CommonProject.scripts.apps.methods.searchAnswerInCaches(title, {
+							webActivityId: activity?.id,
+							providerConfig,
 							type: questionType,
 							options,
 							lineOptions,
-							hasImage: imageUrls.length > 0,
-							imageUrls
-						}
-					);
-				} else {
-					throw new Error('题目为空，请查看题目是否为空，或者忽略此题');
-				}
-			},
+							...images
+						});
+					} else {
+						throw new Error('题目为空，请查看题目是否为空，或者忽略此题');
+					}
+				},
 
-			work: async (ctx) => {
-				const { elements, searchInfos } = ctx;
-				const typeInput = elements.type[0] as HTMLInputElement;
-				const type = typeInput ? getQuestionType(parseInt(typeInput.value)) : undefined;
+				work: async (ctx) => {
+					const { elements, searchInfos } = ctx;
+					const typeInput = elements.type[0] as HTMLInputElement;
+					const type = resolveQuestionType(elements, ctx, elements.title.map((el) => el?.textContent || '').join(' '));
 
-				if (type && (type === 'completion' || type === 'multiple' || type === 'judgement' || type === 'single')) {
-					const resolver = createDefaultQuestionResolver(ctx)[type];
+					if (type && (type === 'completion' || type === 'multiple' || type === 'judgement' || type === 'single')) {
+						if (type === 'multiple')
+							clearOtherMultipleOptions(elements.options, searchInfos[0]?.results[0]?.answer || '');
+						const resolver = createDefaultQuestionResolver(ctx)[type];
 
-					const handler: DefaultWork<any>['handler'] = (type, answer, option, ctx) => {
-						if (type === 'judgement' || type === 'single' || type === 'multiple') {
-							// 检查是否已经选择
-							const checked =
-								option?.parentElement?.querySelector('label input')?.getAttribute('checked') === 'checked' ||
-								// 适配2023/9月最新版本
-								option?.parentElement?.getAttribute('aria-checked') === 'true';
-							if (checked) {
-								// 跳过
-							} else {
-								option?.click();
-							}
-						} else if (type === 'completion' && answer.trim()) {
-							const text = option?.parentElement?.querySelector('textarea');
-							const textareaFrame = option?.parentElement?.querySelector('iframe');
-							if (text) {
-								text.value = answer;
-							}
-							if (textareaFrame?.contentDocument) {
-								textareaFrame.contentDocument.body.innerHTML = answer;
-							}
-							if (option?.parentElement?.parentElement) {
-								/** 如果存在保存按钮则点击 */
-								$el('[onclick*=saveQuestion]', option.parentElement.parentElement)?.click();
-							}
-						}
-					};
-
-					return await resolver(
-						searchInfos,
-						elements.options.map((option) => optimizationElementWithImage(option)),
-						handler
-					);
-				}
-				// 连线题自定义处理
-				else if (type && type === 'line') {
-					for (const answers of searchInfos.map((info) => info.results.map((res) => res.answer))) {
-						let ans = answers;
-						if (ans.length === 1) {
-							ans = splitAnswer(ans[0]);
-						}
-						if (ans.filter(Boolean).length !== 0 && elements.lineAnswerInput) {
-							//  选择答案
-							for (let index = 0; index < elements.lineSelectBox.length; index++) {
-								const box = elements.lineSelectBox[index];
-								if (ans[index]) {
-									$el(`li[data=${ans[index]}] a`, box)?.click();
-									await $.sleep(200);
+						const handler: DefaultWork<any>['handler'] = (type, answer, option, ctx) => {
+							if (ctx.isCancelled?.()) throw new Error('答题已取消');
+							if (type === 'judgement' || type === 'single' || type === 'multiple') {
+								// 检查是否已经选择
+								const checked = isOptionChecked(option);
+								if (checked) {
+									// 跳过
+								} else {
+									option?.click();
+								}
+							} else if (type === 'completion' && answer.trim()) {
+								fillTextAnswer(option, answer);
+								if (option?.parentElement?.parentElement) {
+									/** 如果存在保存按钮则点击 */
+									$el('[onclick*=saveQuestion]', option.parentElement.parentElement)?.click();
 								}
 							}
+						};
 
-							return { finish: true };
+						return await resolver(
+							searchInfos,
+							elements.options.map((option) => optimizationElementWithImage(option)),
+							handler
+						);
+					}
+					// 连线题自定义处理
+					else if (type && type === 'line') {
+						for (const info of searchInfos) {
+							for (const result of info.results) {
+								const filled = await fillGroupedChoices(
+									result.answer,
+									elements.lineSelectBox,
+									'li[data]',
+									() => $.sleep(200),
+									ctx.isCancelled
+								);
+								if (filled.finish) return filled;
+							}
 						}
+						return { finish: false };
 					}
 
 					return { finish: false };
-				}
+				},
 
-				return { finish: false };
-			},
-
-			/** 完成答题后 */
-			async onResultsUpdate(curr, _, res) {
-				CommonProject.scripts.workResults.methods.setResults(
-					simplifyWorkResult(res, chapterTestTaskQuestionTitleTransform)
-				);
-
-				if (curr.result?.finish) {
-					CommonProject.scripts.apps.methods.addQuestionCacheFromWorkResult(
-						simplifyWorkResult([curr], chapterTestTaskQuestionTitleTransform)
+				/** 完成答题后 */
+				async onResultsUpdate(curr, _, res) {
+					CommonProject.scripts.workResults.methods.setResults(
+						simplifyWorkResult(res, (titles) => chapterTestTaskQuestionTitleTransform(titles))
 					);
-				}
-				CommonProject.scripts.workResults.methods.updateWorkStateByResults(res);
+					CommonProject.scripts.workResults.methods.updateWorkStateByResults(res);
 
-				// 没有完成时随机作答
-				if (curr.result?.finish === false && curr.resolved === true) {
-					if (isImageQuestionSkipped(curr.ctx?.searchInfos)) {
-						console.log('图片题已跳过，当前模型未启用视觉能力');
-						return;
+					// 没有完成时随机作答
+					if (curr.result?.finish === false && curr.resolved === true) {
+						if (isQuestionSkipped(curr.ctx?.searchInfos)) {
+							console.log('此题已跳过，不进行随机作答');
+							return;
+						}
+
+						const options = curr.ctx?.elements?.options || [];
+
+						const typeInput = curr.ctx?.elements?.type[0] as HTMLInputElement | undefined;
+						const type = typeInput ? getQuestionType(parseInt(typeInput.value)) : undefined;
+
+						const commonSetting = CommonProject.scripts.settings.cfg;
+
+						if (
+							commonSetting['randomWork-choice'] &&
+							(type === 'judgement' || type === 'single' || type === 'multiple')
+						) {
+							console.log('正在随机作答');
+
+							const option = options[Math.floor(Math.random() * options.length)];
+							// @ts-ignore 随机选择选项
+							option?.parentElement?.querySelector('a,label')?.click();
+						} else if (commonSetting['randomWork-complete'] && type === 'completion') {
+							console.log('正在随机作答');
+
+							// 随机填写答案
+							for (const option of options) {
+								const textarea = option?.parentElement?.querySelector('textarea');
+								const completeTexts = commonSetting['randomWork-completeTexts-textarea'].split('\n').filter(Boolean);
+								const text = completeTexts[Math.floor(Math.random() * completeTexts.length)];
+								const textareaFrame = option?.parentElement?.querySelector('iframe');
+
+								if (text) {
+									if (textarea) {
+										textarea.value = text;
+									}
+									if (textareaFrame?.contentDocument) {
+										textareaFrame.contentDocument.body.innerHTML = text;
+									}
+								} else {
+									console.error('请设置随机填空的文案');
+								}
+
+								await $.sleep(500);
+							}
+						}
 					}
+				},
+				async onElementSearched(elements, root) {
+					await recognizeSecretFontForQuestion(root);
 
-					const options = curr.ctx?.elements?.options || [];
-
-					const typeInput = curr.ctx?.elements?.type[0] as HTMLInputElement | undefined;
+					const typeInput = elements.type[0] as HTMLInputElement;
 					const type = typeInput ? getQuestionType(parseInt(typeInput.value)) : undefined;
 
-					const commonSetting = CommonProject.scripts.settings.cfg;
-
-					if (
-						commonSetting['randomWork-choice'] &&
-						(type === 'judgement' || type === 'single' || type === 'multiple')
-					) {
-						console.log('正在随机作答');
-
-						const option = options[Math.floor(Math.random() * options.length)];
-						// @ts-ignore 随机选择选项
-						option?.parentElement?.querySelector('a,label')?.click();
-					} else if (commonSetting['randomWork-complete'] && type === 'completion') {
-						console.log('正在随机作答');
-
-						// 随机填写答案
-						for (const option of options) {
-							const textarea = option?.parentElement?.querySelector('textarea');
-							const completeTexts = commonSetting['randomWork-completeTexts-textarea'].split('\n').filter(Boolean);
-							const text = completeTexts[Math.floor(Math.random() * completeTexts.length)];
-							const textareaFrame = option?.parentElement?.querySelector('iframe');
-
-							if (text) {
-								if (textarea) {
-									textarea.value = text;
-								}
-								if (textareaFrame?.contentDocument) {
-									textareaFrame.contentDocument.body.innerHTML = text;
-								}
-							} else {
-								console.error('请设置随机填空的文案');
+					/** 判断题转换成文字，以便于答题程序判断 */
+					if (type === 'judgement') {
+						elements.options.forEach((option) => {
+							const opt = option?.textContent?.trim() || '';
+							if (opt.includes('对') || opt.includes('错')) {
+								// 2023/8/5日后超星已修复判断题，将图片修改成文字，如果已经有对错的文本，则不需要再转换
 							}
-
-							await $.sleep(500);
-						}
+							// 如果是英语的对错题目，他是一个英文单词 True,False
+							else if (opt === 'True') {
+								option.textContent = '√';
+							} else if (opt === 'False') {
+								option.textContent = 'x';
+							}
+							// 支持香港地区的繁体字
+							else if (opt === '對') {
+								option.textContent = '√';
+							} else if (opt === '錯') {
+								option.textContent = 'x';
+							} else {
+								const ri = option.querySelector('.ri');
+								const span = document.createElement('span');
+								span.innerText = ri ? '√' : '×';
+								option.appendChild(span);
+							}
+						});
 					}
 				}
-			},
-			async onElementSearched(elements, root) {
-				await recognizeSecretFontForQuestion(root);
+			});
 
-				const typeInput = elements.type[0] as HTMLInputElement;
-				const type = typeInput ? getQuestionType(parseInt(typeInput.value)) : undefined;
+			const results = await worker.doWork();
 
-				/** 判断题转换成文字，以便于答题程序判断 */
-				if (type === 'judgement') {
-					elements.options.forEach((option) => {
-						const opt = option?.textContent?.trim() || '';
-						if (opt.includes('对') || opt.includes('错')) {
-							// 2023/8/5日后超星已修复判断题，将图片修改成文字，如果已经有对错的文本，则不需要再转换
-						}
-						// 如果是英语的对错题目，他是一个英文单词 True,False
-						else if (opt === 'True') {
-							option.textContent = '√';
-						} else if (opt === 'False') {
-							option.textContent = 'x';
-						}
-						// 支持香港地区的繁体字
-						else if (opt === '對') {
-							option.textContent = '√';
-						} else if (opt === '錯') {
-							option.textContent = 'x';
-						} else {
-							const ri = option.querySelector('.ri');
-							const span = document.createElement('span');
-							span.innerText = ri ? '√' : '×';
-							option.appendChild(span);
-						}
-					});
-				}
-			}
-		});
+			const msg = `答题完成，将等待 ${stopSecondWhenFinish} 秒后进行保存或提交。`;
+			console.info(msg);
+			$message.info({ content: msg, duration: stopSecondWhenFinish });
+			await $.sleep(stopSecondWhenFinish * 1000);
 
-		const results = await worker.doWork();
-
-		const msg = `答题完成，将等待 ${stopSecondWhenFinish} 秒后进行保存或提交。`;
-		console.info(msg);
-		$message.info({ content: msg, duration: stopSecondWhenFinish });
-		await $.sleep(stopSecondWhenFinish * 1000);
-
-		// 处理提交
-		await worker.uploadHandler({
-			type: upload,
-			results,
-			async callback(finishedRate, uploadable) {
-				const msg = `完成率 ${finishedRate.toFixed(2)}% :  ${uploadable ? '3秒后将自动提交' : '3秒后将自动保存'} `;
-				console.info(msg);
-				$message.success({ content: msg, duration: 3 });
-
-				await $.sleep(3000);
-
-				if (uploadable) {
-					// @ts-ignore 提交
-					frameWindow.btnBlueSubmit();
+			// 处理提交
+			await worker.uploadHandler({
+				type: upload,
+				results,
+				async callback(finishedRate, uploadable) {
+					const msg = `完成率 ${finishedRate.toFixed(2)}% :  ${uploadable ? '3秒后将自动提交' : '3秒后将自动保存'} `;
+					console.info(msg);
+					$message.success({ content: msg, duration: 3 });
 
 					await $.sleep(3000);
-					/** 确定按钮 */
-					// @ts-ignore 确定
-					frameWindow.submitCheckTimes();
-					// @ts-ignore 2024/4 更新后上方函数无法关闭弹窗，需要手动关闭确定弹窗
-					top.$('#workpop').hide();
-				} else {
-					// @ts-ignore 禁止弹窗
-					frameWindow.alert = () => {};
-					// @ts-ignore 暂时保存
-					frameWindow.noSubmit();
+
+					if (uploadable) {
+						// @ts-ignore 提交
+						frameWindow.btnBlueSubmit();
+
+						await $.sleep(3000);
+						/** 确定按钮 */
+						// @ts-ignore 确定
+						frameWindow.submitCheckTimes();
+						// @ts-ignore 2024/4 更新后上方函数无法关闭弹窗，需要手动关闭确定弹窗
+						top.$('#workpop').hide();
+					} else {
+						// @ts-ignore 禁止弹窗
+						frameWindow.alert = () => {};
+						// @ts-ignore 暂时保存
+						frameWindow.noSubmit();
+					}
 				}
+			});
+
+			// 还原尺寸状态
+			if (visual_state === 'minimize' && CommonProject.scripts.render.cfg.visual !== 'minimize') {
+				CORSUtils.panelMinimize();
 			}
-		});
 
-		// 还原尺寸状态
-		if (visual_state === 'minimize' && CommonProject.scripts.render.cfg.visual !== 'minimize') {
-			CORSUtils.panelMinimize();
+			worker.emit('done');
+		} finally {
+			activity?.release();
 		}
-
-		worker.emit('done');
 	},
 	/**
 	 * 带音频的PPT
@@ -2266,7 +2248,7 @@ function getQuestionType(
 
 function resolveQuestionType(
 	elements: { type?: HTMLElement[]; options?: HTMLElement[] },
-	ctx?: { type?: ReturnType<typeof getQuestionType> },
+	ctx?: { type?: ReturnType<typeof getQuestionType>; root?: HTMLElement },
 	title = ''
 ): ReturnType<typeof getQuestionType> | undefined {
 	const typeInput = elements.type?.[0] as HTMLInputElement | undefined;
@@ -2293,74 +2275,50 @@ function resolveQuestionType(
 		return 'completion';
 	}
 
+	if (ctx?.root?.querySelector('input[type=checkbox]')) return 'multiple';
+	if (ctx?.root?.querySelector('textarea,[contenteditable=true]')) return 'completion';
 	const options = elements.options || [];
 	const optionText = options.map((option) => option?.innerText?.trim()).filter(Boolean);
-	if (optionText.length === 2 && optionText.every((text) => /^(正确|错误|对|错|√|×|true|false|是|否)$/i.test(text))) {
+	if (optionText.length === 2 && optionText.every((text) => /^(正确|错误|对|错|√|×|true|false|是|否)$/i.test(text)))
 		return 'judgement';
-	}
+	if (ctx?.root?.querySelector('input[type=radio]')) return 'single';
 }
 
-function collectQuestionImageUrls(
-	titleElements: (HTMLElement | undefined)[] = [],
-	optionElements: (HTMLElement | undefined)[] = []
-) {
-	const urls = new Set<string>();
-	for (const root of [...titleElements, ...optionElements]) {
-		if (!root) {
-			continue;
-		}
-		for (const img of Array.from(root.querySelectorAll<HTMLImageElement>('img'))) {
-			const url = img.currentSrc || img.src || img.getAttribute('data-original') || img.getAttribute('data-src') || '';
-			if (url.trim()) {
-				urls.add(url.trim());
-			}
-		}
-	}
-	return Array.from(urls);
-}
-
-function collectLineOptionGroups(selectBoxes: (HTMLElement | undefined)[] = []): AILineOptionGroup[] {
+function collectLineOptionGroups(
+	selectBoxes: (HTMLElement | undefined)[] = [],
+	imageUrls: string[] = []
+): AILineOptionGroup[] {
 	return selectBoxes
 		.map((box, index) => {
 			const options = Array.from(box?.querySelectorAll<HTMLElement>('li[data]') || [])
 				.map((item) => {
 					const value = item.getAttribute('data')?.trim() || '';
-					const text = item.innerText.trim();
+					const text = questionElementText(item, imageUrls);
 					return value && text ? { value, text } : undefined;
 				})
 				.filter(Boolean) as { value: string; text: string }[];
-			return options.length ? { index, options } : undefined;
+			return { index, options };
 		})
 		.filter((group): group is AILineOptionGroup => Boolean(group));
 }
 
-function isImageQuestionSkipped(infos: SearchInformation[] | undefined) {
-	return Boolean(infos?.some((info) => (info.data as any)?.reason === 'model_without_vision'));
+function isQuestionSkipped(infos: SearchInformation[] | undefined) {
+	return Boolean(infos?.some((info) => (info.data as any)?.skipped === true));
 }
 
 /** 阅读理解和完形填空的共同处理器 */
-async function readerAndFillHandle(searchInfos: SearchInformation[], list: HTMLElement[]) {
-	for (const answers of searchInfos.map((info) => info.results.map((res) => res.answer))) {
-		let ans = answers;
-
-		if (ans.length === 1) {
-			ans = splitAnswer(ans[0]);
+async function readerAndFillHandle(searchInfos: SearchInformation[], list: HTMLElement[], cancelled?: () => boolean) {
+	for (const info of searchInfos)
+		for (const result of info.results) {
+			const filled = await fillGroupedChoices(
+				result.answer,
+				list,
+				'span.saveSingleSelect[data]',
+				() => $.sleep(200),
+				cancelled
+			);
+			if (filled.finish) return filled;
 		}
-
-		if (ans.filter(Boolean).length !== 0 && list.length !== 0) {
-			for (let index = 0; index < ans.length; index++) {
-				const item = list[index];
-				if (item) {
-					/** 获取每个小题中的准确答案选项 并点击 */
-					$el(`span.saveSingleSelect[data="${ans[index]}"]`, item)?.click();
-					await $.sleep(200);
-				}
-			}
-
-			return { finish: true };
-		}
-	}
-
 	return { finish: false };
 }
 

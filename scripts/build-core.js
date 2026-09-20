@@ -50,28 +50,7 @@ async function createUserJs() {
 	const createOptions = () => {
 		const { CXProject } = app;
 
-		const matchDomains = [
-			'chaoxing.com',
-			'edu.cn',
-			'org.cn',
-			'xueyinonline.com',
-			'hnsyu.net',
-			'qutjxjy.cn',
-			'ynny.cn',
-			'hnvist.cn',
-			'fjlecb.cn',
-			'gdhkmooc.com',
-			'cugbonline.cn',
-			'zjelib.cn',
-			'cqrspx.cn',
-			'neauce.com',
-			'zhihui-yun.com',
-			'cqie.cn',
-			'ccqmxx.com',
-			'jxgmxy.com',
-			'jnzyjsxy.cn',
-			'sslibrary.com'
-		];
+		const matchDomains = ['chaoxing.com'];
 
 		return {
 			parseRequire: true,
@@ -95,9 +74,10 @@ async function createUserJs() {
 				source: 'https://github.com/yxxawa/xuexitong-ai-helper',
 				icon: 'https://raw.githubusercontent.com/yxxawa/xuexitong-ai-helper/main/docs/assets/icon.svg',
 				connect: ['*'],
-				match: matchDomains.map((domain) => `*://*.${domain}/*`),
+				match: [...matchDomains.map((domain) => `*://*.${domain}/*`), 'https://chat.deepseek.com/*'],
 				grant: [
 					'GM_info',
+					'GM_openInTab',
 					'GM_getTab',
 					'GM_saveTab',
 					'GM_setValue',
@@ -143,9 +123,6 @@ async function createUserJs() {
 
 	/** 创建全Connect域名通用脚本 */
 	const commonOpts = createOptions();
-	const connect = Array.isArray(commonOpts.metadata.connect) ? commonOpts.metadata.connect : [];
-	commonOpts.metadata.connect = connect;
-	commonOpts.entry = path.join(__dirname, '../packages/scripts/entry.common.js');
 	commonOpts.dist = path.join(distResolvedPath, 'xuexitong-ai-helper.common.user.js');
 
 	console.log('createUserScript: ', commonOpts.metadata.name, commonOpts.dist);

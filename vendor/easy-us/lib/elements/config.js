@@ -11,6 +11,15 @@ const interface_1 = require("./interface");
  *
  */
 class ConfigElement extends interface_1.IElement {
+    addStoreListener(key, listener) {
+        const id = this.store.addChangeListener(key, listener);
+        (this.listenerIds || (this.listenerIds = [])).push(id);
+        return id;
+    }
+    disconnectedCallback() {
+        for (const id of this.listenerIds || []) this.store.removeChangeListener(id);
+        this.listenerIds = [];
+    }
     constructor(store) {
         super();
         /** 描述 */
@@ -100,18 +109,18 @@ class ConfigElement extends interface_1.IElement {
                                 return;
                             }
                             const val = parseFloat(this.provider.value);
-                            const _min = min ? parseFloat(min) : undefined;
-                            const _max = max ? parseFloat(max) : undefined;
-                            if (_min && val < _min) {
+                            const _min = min !== undefined ? Number(min) : undefined;
+                            const _max = max !== undefined ? Number(max) : undefined;
+                            if (_min !== undefined && val < _min) {
                                 this.provider.value = _min.toString();
                                 this.store.set(this.key, parseFloat(this.provider.value));
                             }
-                            else if (_max && val > _max) {
+                            else if (_max !== undefined && val > _max) {
                                 this.provider.value = _max.toString();
                                 this.store.set(this.key, parseFloat(this.provider.value));
                             }
                             else {
-                                this.store.set(this.key, val);
+                                this.store.set(this.key, Number.isFinite(val) ? val : this.defaultValue);
                             }
                         }
                         else {
@@ -149,7 +158,7 @@ class ConfigElement extends interface_1.IElement {
         }
         // 处理跨域
         if (this.sync) {
-            this.store.addChangeListener(this.key, (curr) => {
+            this.addStoreListener(this.key, (curr) => {
                 this.provider.value = curr;
             });
         }
@@ -179,7 +188,7 @@ class ConfigElement extends interface_1.IElement {
                 if (typeof this.showIf[1] !== 'function') {
                     throw new Error('EUS Config.showIf second element must be a function');
                 }
-                this.store.addChangeListener(this.showIf[0], (curr, pre) => {
+                this.addStoreListener(this.showIf[0], (curr, pre) => {
                     if (this.isConnected) {
                         if (this.showIf && Array.isArray(this.showIf)) {
                             const res = this.showIf[1].call(null, curr, pre, this.store);
@@ -194,7 +203,7 @@ class ConfigElement extends interface_1.IElement {
                 });
             }
             else {
-                this.store.addChangeListener(this.showIf, (curr) => {
+                this.addStoreListener(this.showIf, (curr) => {
                     if (this.isConnected) {
                         const res = Boolean(curr);
                         if (res) {

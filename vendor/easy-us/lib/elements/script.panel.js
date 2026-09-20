@@ -27,6 +27,9 @@ class ScriptPanelElement extends interface_1.IElement {
         /** 锁定配置板块 */
         this.lockWrapper = (0, dom_1.h)('div', { className: 'lock-wrapper' });
     }
+    disconnectedCallback() {
+        if (this.cleanup) this.cleanup();
+    }
     connectedCallback() {
         this.separator.innerText = this.name || '';
         this.append(this.separator);

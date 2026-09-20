@@ -96,7 +96,7 @@ export declare class CustomWindow {
     setFontSize(fontsize: number): void;
     setVisual(value: VisualType): void;
     changeRenderURLs(urls: string[]): Promise<void>;
-    changePanel(currentPanelName: string): Promise<void>;
+    changePanel(currentPanelName: string, force?: boolean): Promise<void>;
     /**
      * 将当前的脚本置顶
      * @param script 脚本

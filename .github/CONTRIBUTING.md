@@ -45,7 +45,7 @@ pnpm build
 
 Release 附件使用 `dist/xuexitong-ai-helper.common.user.js`。常规流程：
 
-1. 更新版本号和 `CHANGELOG.md`。
-2. 运行 `pnpm typecheck && pnpm build`。
+1. 更新版本号和 `docs/CHANGELOG.md`。
+2. 运行 `pnpm typecheck && pnpm test && pnpm build`。
 3. 创建 tag 和 GitHub Release。
 4. 上传 `dist/xuexitong-ai-helper.common.user.js`。

@@ -232,13 +232,13 @@ function mount(startConfig) {
                 win.setFontSize(fs);
             });
             store_1.$store.addTabChangeListener(const_1.$const.TAB_URLS, (0, debounce_1.default)((curr, pre) => {
-                if (JSON.stringify(curr) === JSON.stringify(pre)) {
+                if (!Array.isArray(curr) || JSON.stringify(curr) === JSON.stringify(pre)) {
                     return;
                 }
                 win.changeRenderURLs(curr);
             }, 2000));
             store_1.$store.addTabChangeListener(const_1.$const.TAB_CURRENT_PANEL_NAME, (curr, pre) => {
-                if (curr === pre) {
+                if (typeof curr !== 'string' || !curr.trim() || curr === pre) {
                     return;
                 }
                 win.changePanel(curr);
@@ -254,6 +254,8 @@ function mount(startConfig) {
 }
 function updateMenusState(win, name) {
     var _a;
+    // Tab-signal cleanup on pagehide is not a navigation request.
+    if (typeof name !== 'string' || !name.trim()) return;
     win.root.querySelectorAll('.extra-menu-bar .script-panel-link').forEach((el) => el.classList.remove('active'));
     (_a = win.root.querySelector('.extra-menu-bar [data-name="' + name.replace(/\s/g, '_') + '"]')) === null || _a === void 0 ? void 0 : _a.classList.add('active');
 }

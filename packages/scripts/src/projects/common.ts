@@ -1,3 +1,16 @@
+import {
+	acquireWebActivity,
+	assertWebActivity,
+	getWebActivity,
+	watchWebActivity,
+	webActivityMessage,
+	type WebActivityLease
+} from '../utils/web-activity';
+import { getWebBridgeState, openDeepSeekBridge } from '../utils/web-ai';
+import { closeAIConfigEmptyWarning } from '../utils/work';
+import { $win } from 'easy-us/lib/utils/start';
+import { QuestionAnswerCache, type QuestionCache } from '../utils/answer-cache';
+import { getVisionCapability } from '../utils/vision';
 import debounce from 'lodash/debounce';
 import { $ } from '@xuexitong-ai-helper/core/src/utils/common';
 import { request } from '@xuexitong-ai-helper/core/src/core/utils/request';
@@ -13,8 +26,9 @@ import { RenderScript } from '../render';
 import { dropdownStyle } from '../utils/configs';
 import {
 	AILineOptionGroup,
-	DEFAULT_AI_PROMPT,
+	type AIAnswererOptions,
 	fetchAIModels,
+	probeVisionModel,
 	hasAnswerProvider,
 	queryAIAnswerer
 } from '../utils/ai';
@@ -48,19 +62,28 @@ const state = {
 /**
  * 答案缓存类型
  */
-type QuestionCache = { title: string; answer: string; from: string; homepage: string; ai?: boolean };
+const questionCache = new QuestionAnswerCache({
+	get: () => CommonProject.scripts.apps.cfg.localQuestionCaches,
+	set: (entries) => {
+		CommonProject.scripts.apps.cfg.localQuestionCaches = entries;
+	},
+	enabled: () => CommonProject.scripts.settings.cfg.enableQuestionCaches !== false
+});
 
 type SearchAnswerOptions = {
+	webActivityId?: string;
+	providerConfig?: AIAnswererOptions;
 	type?: string;
 	options?: string[] | string;
 	lineOptions?: AILineOptionGroup[];
 	hasImage?: boolean;
+	unresolvedImageCount?: number;
 	imageUrls?: string[];
 };
 
 export const CommonProject = Project.create({
 	name: '学习通AI辅助插件',
-	domains: [],
+	domains: ['chaoxing.com'],
 	scripts: {
 		guide: new Script({
 			name: '首页',
@@ -68,16 +91,12 @@ export const CommonProject = Project.create({
 			namespace: 'common.guide',
 			configs: {
 				notes: {
-					defaultValue: $ui.notes([
-						'支持章节学习、章节测试、作业、考试预览和 AI 答题。',
-						'进入课程、作业或考试页面后，脚本会自动显示对应控制面板。',
-						'自动答题前请先配置 AI 接口、API Key 和模型。'
-					]).outerHTML
+					defaultValue: ''
 				}
 			},
 			onrender({ panel }) {
 				const guide = createGuide();
-				guide.style.width = '520px';
+				guide.style.width = '100%';
 				panel.body.replaceChildren(guide);
 			}
 		}),
@@ -87,11 +106,7 @@ export const CommonProject = Project.create({
 			namespace: 'common.settings',
 			configs: {
 				notes: {
-					defaultValue: $ui.notes([
-						'先填写 AI 接口地址和 API Key，再点击“AI模型”获取模型列表。',
-						'选择模型后进入章节测试、作业或考试页面即可自动答题。',
-						'鼠标移动到按钮或输入框可以查看说明。'
-					]).outerHTML
+					defaultValue: '设置自动保存。模型可直接输入，也可获取列表后筛选。'
 				},
 				upload: {
 					label: '答题完成后',
@@ -109,8 +124,7 @@ export const CommonProject = Project.create({
 						['force', '强制自动提交', '不管答案是否正确直接强制自动提交，如需开启，请配合随机作答谨慎使用。']
 					],
 					attrs: {
-						title:
-							'自动答题完成后的设置，目前仅在章节测试中生效，鼠标悬浮在选项上可以查看说明。'
+						title: '自动答题完成后的设置，目前仅在章节测试中生效，鼠标悬浮在选项上可以查看说明。'
 					}
 				},
 				thread: {
@@ -120,142 +134,156 @@ export const CommonProject = Project.create({
 						min: 1,
 						step: 1,
 						max: 8,
-						title:
-							'作业/考试/章节测试中同时请求 AI 的题目数量。数值越大越快，也更容易触发接口限速；建议 1-3。'
+						title: '作业/考试/章节测试中同时请求 AI 的题目数量。数值越大越快，也更容易触发接口限速；建议 1-3。'
 					},
 					defaultValue: 1
 				},
+				aiProvider: {
+					label: 'AI 来源',
+					tag: 'select',
+					defaultValue: 'api' as 'api' | 'deepseek-web',
+					options: [
+						['api', 'API 接口', '稳定方式，支持自定义模型与图片'],
+						[
+							'deepseek-web',
+							'DeepSeek 网页（实验）',
+							'需手动启用专用已登录标签页；支持图片；题目与附件会保存在网页账号历史中'
+						]
+					],
+					onload() {
+						this.addEventListener('change', () => setTimeout(updateVisionStatus));
+					}
+				},
+				aiWebConnectButton: {
+					label: '网页连接',
+					defaultValue: '打开 DeepSeek 专用标签页',
+					attrs: { type: 'button', title: '请在打开的空白页登录并手动启用。不会读取或导出登录凭据，不处理验证码。' },
+					onload() {
+						this.value = '打开 DeepSeek 专用标签页';
+						this.onclick = openDeepSeekBridge;
+					}
+				},
 				aiApiUrl: {
+					onload() {
+						this.addEventListener('change', updateVisionStatus);
+					},
 					separator: 'AI做题',
 					label: 'AI接口地址',
 					attrs: {
 						placeholder: 'https://api.openai.com/v1/chat/completions',
-						title: '填写 OpenAI 兼容的 chat/completions 接口地址。'
+						title:
+							'OpenAI 兼容接口填写 /v1 或 /chat/completions；Anthropic 兼容接口填写 /v1/messages。协议由接口地址决定。'
 					},
 					defaultValue: ''
 				},
 				aiApiKey: {
+					onload() {
+						this.addEventListener('change', updateVisionStatus);
+					},
 					label: 'AI API Key',
 					attrs: {
 						type: 'password',
 						placeholder: 'sk-...',
-						title: '请求时会放入 Authorization: Bearer <key>。'
+						title: 'OpenAI 兼容接口使用 Bearer；Anthropic 兼容接口使用 x-api-key。'
 					},
 					defaultValue: ''
 				},
 				aiModel: {
-					attrs: { type: 'hidden' },
-					defaultValue: ''
-				},
-				aiVisionModels: {
-					attrs: { type: 'hidden' },
-					defaultValue: ''
-				},
-				aiVisionMode: {
-					label: '模型支持图片识别',
-					tag: 'select',
-					defaultValue: 'auto' as 'auto' | 'support' | 'unsupported',
-					options: [
-						['auto', '自动判断', '根据 /models 返回信息和模型名自动判断是否支持图片识别。'],
-						['support', '支持', '强制认为当前模型支持图片识别，图片题会把图片链接发送给 AI。'],
-						['unsupported', '不支持', '强制认为当前模型不支持图片识别，图片题会直接跳过。']
-					],
-					attrs: {
-						title: '默认自动判断；如果接口返回的模型能力不准，可以手动指定支持或不支持。'
+					label: '模型',
+					attrs: { placeholder: '输入模型 ID，或获取列表后筛选', type: 'text', autocomplete: 'off' },
+					defaultValue: '',
+					onload() {
+						this.setAttribute('list', 'xth-ai-models');
+						this.oninput = () => {
+							CommonProject.scripts.settings.cfg.aiModel = this.value.trim();
+							updateVisionStatus();
+						};
 					}
 				},
+				aiModelSuggestions: { attrs: { type: 'hidden' }, defaultValue: [] as string[] },
+				aiModelSuggestionSource: { attrs: { type: 'hidden' }, defaultValue: '' },
 				aiModelFetchButton: {
-					label: 'AI模型',
-					defaultValue: '点击获取模型列表',
-					attrs: {
-						type: 'button',
-						title: '根据 AI 接口地址自动请求 /models，并选择接口支持的模型。当前选择会作为 AI 请求的 model 字段。'
-					},
+					label: '模型列表',
+					defaultValue: '获取模型列表',
+					attrs: { type: 'button', title: '可选操作。即使接口不提供模型列表，也可以直接输入模型 ID。' },
 					onload() {
-						this.value = CommonProject.scripts.settings.cfg.aiModel
-							? '当前模型：' + CommonProject.scripts.settings.cfg.aiModel
-							: '点击获取模型列表';
+						this.value = '获取模型列表';
 						this.onclick = async () => {
+							const cfg = CommonProject.scripts.settings.cfg;
+							const snapshot = { ...cfg };
+							this.value = '获取中…';
+							this.disabled = true;
 							try {
-								this.value = '获取中...';
-								this.disabled = true;
-								const models = await fetchAIModels(CommonProject.scripts.settings.cfg);
-
-								if (models.length === 0) {
-									$modal.alert({
-										content: '没有从接口返回中解析到模型列表，请检查接口是否支持 /models。'
-									});
-									return;
-								}
-
-								const select = h(
-									'select',
-									{
-										className: 'base-style-active-form-control',
-										style: { width: '100%', marginTop: '8px' }
-									},
-									models.map((model) =>
-										h(
-											'option',
-											{ value: model.id, selected: model.id === CommonProject.scripts.settings.cfg.aiModel },
-											model.supportsVision ? `${model.id} [视觉]` : model.id
-										)
+								const models = await fetchAIModels(snapshot);
+								if (snapshot.aiApiUrl !== cfg.aiApiUrl || snapshot.aiApiKey !== cfg.aiApiKey) return;
+								cfg.aiModelSuggestions = models.map((model) => model.id);
+								cfg.aiModelSuggestionSource = cfg.aiApiUrl.trim();
+								updateVisionStatus();
+								const list = CommonProject.scripts.settings.panel?.body.querySelector('datalist');
+								list?.replaceChildren(
+									...models.map((model) =>
+										h('option', {
+											value: model.id,
+											label:
+												model.supportsVision === true
+													? '支持图片'
+													: model.supportsVision === false
+													? '仅文本'
+													: '图片能力未知'
+										})
 									)
 								);
-
-								const modal = $modal.confirm({
-									width: 520,
-									title: '选择AI模型',
-									content: h('div', [
-										h('div', { className: 'secondary' }, `已获取 ${models.length} 个模型。`),
-										h(
-											'div',
-											{ className: 'secondary', style: { marginTop: '4px' } },
-											'带 [视觉] 的模型会在“自动判断”下处理图片题；也可以用“模型支持图片识别”手动覆盖。'
-										),
-										select
-									]),
-									confirmButtonText: '使用此模型',
-									onConfirm: () => {
-										CommonProject.scripts.settings.cfg.aiModel = select.value;
-										CommonProject.scripts.settings.cfg.aiVisionModels = models
-											.filter((model) => model.supportsVision)
-											.map((model) => model.id)
-											.join('\n');
-										this.value = '当前模型：' + select.value;
-										modal?.remove();
-									}
-								});
-							} catch (err) {
-								$modal.alert({
-									content: h('div', [
-										h('div', '获取模型列表失败：'),
-										h('pre', { style: { whiteSpace: 'pre-wrap' } }, err instanceof Error ? err.message : String(err))
-									])
-								});
+								$message.info(
+									models.length
+										? '已获取 ' + models.length + ' 个模型，输入名称即可筛选。'
+										: '接口未返回模型列表，请直接输入模型 ID。'
+								);
+							} catch (error) {
+								$message.error(
+									'模型列表获取失败，仍可手动输入：' + (error instanceof Error ? error.message : String(error))
+								);
 							} finally {
 								this.disabled = false;
-								if (this.value === '获取中...') {
-									this.value = '点击获取';
-								}
+								this.value = '获取模型列表';
 							}
 						};
 					}
 				},
-				aiPrompt: {
-					label: 'AI输出限制',
-					tag: 'textarea',
-					attrs: {
-						title: '限制 AI 只返回可解析答案。请保留 JSON answer 格式要求。',
-						style: { minWidth: '260px', minHeight: '150px' }
+				aiVisionMode: {
+					label: '图片能力',
+					tag: 'select',
+					onload() {
+						this.addEventListener('change', updateVisionStatus);
 					},
-					defaultValue: DEFAULT_AI_PROMPT,
-					onload(el) {
-						el.addEventListener('change', () => {
-							if (String(el.value).trim() === '') {
-								el.value = el.defaultValue;
+					defaultValue: 'auto' as 'auto' | 'support' | 'unsupported',
+					options: [
+						['auto', '自动检测', '仅向已确认支持图片的模型发送图片题；能力未知时先跳过，可使用随机测试图检测。'],
+						['support', '强制启用', '将题干和选项图片以 base64 发送给模型。'],
+						['unsupported', '仅文本', '跳过图片题，不发送缺少图片的题目。']
+					]
+				},
+				aiVisionTestButton: {
+					label: '视觉检测',
+					defaultValue: '检测图片（少量计费）',
+					attrs: { type: 'button', title: '发送一张随机数字测试图，会产生少量 API 费用；不会发送课程或题目内容。' },
+					onload() {
+						this.value = '检测图片（少量计费）';
+						this.onclick = async () => {
+							this.disabled = true;
+							this.value = '检测中…';
+							try {
+								$modal.alert({
+									title: '视觉检测结果',
+									content: await probeVisionModel({ ...CommonProject.scripts.settings.cfg })
+								});
+							} catch (error) {
+								$message.error(error instanceof Error ? error.message : String(error));
+							} finally {
+								this.disabled = false;
+								this.value = '检测图片（少量计费）';
+								updateVisionStatus();
 							}
-						});
+						};
 					}
 				},
 				aiTemperature: {
@@ -479,14 +507,14 @@ export const CommonProject = Project.create({
 					getWorkOptions: () => {
 						// 使用 json 深拷贝，防止修改原始配置
 						const cfg = JSON.parse(JSON.stringify(this.cfg)) as typeof this.cfg;
-						cfg.thread = Math.max(1, Math.min(8, parseInt(String(cfg.thread || 1), 10) || 1));
+						cfg.thread =
+							cfg.aiProvider === 'deepseek-web'
+								? 1
+								: Math.max(1, Math.min(8, parseInt(String(cfg.thread || 1), 10) || 1));
 						cfg.period = Math.max(1, parseInt(String(cfg.period || 1), 10) || 1);
 						cfg.aiTemperature = Number(cfg.aiTemperature ?? 0);
 						cfg.aiMaxTokens = Math.max(1, parseInt(String(cfg.aiMaxTokens || 700), 10) || 700);
-						cfg.stopSecondWhenFinish = Math.max(
-							0,
-							parseInt(String(cfg.stopSecondWhenFinish || 0), 10) || 0
-						);
+						cfg.stopSecondWhenFinish = Math.max(0, parseInt(String(cfg.stopSecondWhenFinish || 0), 10) || 0);
 						return cfg;
 					},
 					/**
@@ -548,17 +576,41 @@ export const CommonProject = Project.create({
 				});
 			},
 			onrender({ panel }) {
-				if ($gm.isInGMContext()) {
-					const testNotification = h(
-						'button',
-						{ className: 'base-style-button' },
-						'测试系统通知'
+				const list = h(
+					'datalist',
+					{ id: 'xth-ai-models' },
+					(this.cfg.aiModelSuggestionSource === this.cfg.aiApiUrl.trim() ? this.cfg.aiModelSuggestions : []).map((id) =>
+						h('option', { value: id })
+					)
+				);
+				const cache = h(
+					'button',
+					{ type: 'button', className: 'base-style-button', onclick: showQuestionCacheDialog },
+					'答案缓存（' + questionCache.list().length + '）'
+				);
+				const status = h('div', { id: 'xth-vision-status', className: 'secondary' }, visionStatusText());
+				const actions = h('div', { className: 'settings-actions' }, [cache]);
+				if ($gm.isInGMContext())
+					actions.append(
+						h(
+							'button',
+							{
+								type: 'button',
+								className: 'base-style-button',
+								onclick: () => this.methods.notificationBySetting('这是一条测试通知')
+							},
+							'测试通知'
+						)
 					);
-					testNotification.onclick = () => {
-						this.methods.notificationBySetting('这是一条测试通知');
-					};
-					panel.body.replaceChildren(h('hr'), h('div', { style: { display: 'flex' } }, [testNotification]));
-				}
+				panel.body.replaceChildren(list, status, actions);
+				queueMicrotask(updateVisionStatus);
+				const poll = setInterval(() => {
+					if (!panel.isConnected) {
+						clearInterval(poll);
+						return;
+					}
+					updateVisionStatus();
+				}, 1500);
 			}
 		}),
 		workResults: new Script({
@@ -878,12 +930,7 @@ export const CommonProject = Project.create({
 												h('span', `已搜题: ${this.cfg.requestedCount}/${this.cfg.totalQuestionCount}`),
 												h('span', `已答题: ${this.cfg.resolvedCount}/${this.cfg.totalQuestionCount}`),
 												...(tokenStats.count
-													? [
-															h(
-																'span',
-																`AI Token: ${tokenStats.total} / 平均 ${tokenStats.average.toFixed(1)}/题`
-															)
-													  ]
+													? [h('span', `AI Token: ${tokenStats.total} / 平均 ${tokenStats.average.toFixed(1)}/题`)]
 													: []),
 												h('a', '提示', (btn) => {
 													btn.style.cursor = 'pointer';
@@ -1014,61 +1061,82 @@ export const CommonProject = Project.create({
 					content.style.marginBottom = '12px';
 				});
 
+				let searching = false;
+				let activity: WebActivityLease | undefined;
 				const search = async (value: string) => {
+					value = value.trim();
+					if (searching) return;
+					if (!value) {
+						content.textContent = '请输入题目后再搜索。';
+						return;
+					}
 					if (hasAnswerProvider(CommonProject.scripts.settings.cfg) === false) {
 						$modal.alert({ content: '请先在 AI设置 中配置 AI，才能进行手动搜题。' });
 						return;
 					}
 
-					content.replaceChildren(h('span', '搜索中...'));
+					searching = true;
+					button.disabled = true;
+					button.textContent = '搜索中…';
+					try {
+						const config = { ...CommonProject.scripts.settings.cfg };
+						if (config.aiProvider === 'deepseek-web') activity = await acquireWebActivity('search');
+						content.replaceChildren(h('span', '搜索中…'));
 
-					if (value) {
-						const t = Date.now();
-						const infos = await CommonProject.scripts.apps.methods.searchAnswerInCaches(
-							value,
-							{
+						if (value) {
+							const t = Date.now();
+							const infos = await CommonProject.scripts.apps.methods.searchAnswerInCaches(value, {
 								type: 'unknown',
+								webActivityId: activity?.id,
+								providerConfig: config,
 								options: ''
-							}
-						);
-						// 耗时计算
-						const resume = ((Date.now() - t) / 1000).toFixed(2);
+							});
+							// 耗时计算
+							const resume = ((Date.now() - t) / 1000).toFixed(2);
 
-						content.replaceChildren(
-							h(
-								'div',
-								[
-									h('hr'),
-									h(
-										'div',
-										{ style: { color: '#a1a1a1' } },
-										`搜索到 ${infos.map((i) => i.results).flat().length} 个结果，共耗时 ${resume} 秒`
-									),
-									h(SearchInfosElement, {
-										infos: infos.map((info) => ({
-											results: info.results.map(
-												(res) => [res.question, res.answer, res.extra_data || {}] as [string, string, object]
-											),
-											homepage: info.homepage,
-											name: info.name,
-											response: info.response,
-											data: info.data,
-											error: info.error
-										})),
-										question: value,
-										hideResultQuestion: true
-									})
-								],
-								(div) => {
-									div.classList.add('card');
-									div.style.boxSizing = 'border-box';
-									div.style.width = '100%';
-									div.style.maxWidth = '100%';
-								}
-							)
-						);
-					} else {
-						content.replaceChildren(h('span', '题目不能为空！'));
+							content.replaceChildren(
+								h(
+									'div',
+									[
+										h('hr'),
+										h(
+											'div',
+											{ style: { color: 'var(--xth-muted)' } },
+											`搜索到 ${infos.map((i) => i.results).flat().length} 个结果，共耗时 ${resume} 秒`
+										),
+										h(SearchInfosElement, {
+											infos: infos.map((info) => ({
+												results: info.results.map(
+													(res) => [res.question, res.answer, res.extra_data || {}] as [string, string, object]
+												),
+												homepage: info.homepage,
+												name: info.name,
+												response: info.response,
+												data: info.data,
+												error: info.error
+											})),
+											question: value,
+											hideResultQuestion: true
+										})
+									],
+									(div) => {
+										div.classList.add('card');
+										div.style.boxSizing = 'border-box';
+										div.style.width = '100%';
+										div.style.maxWidth = '100%';
+									}
+								)
+							);
+						} else {
+							content.replaceChildren(h('span', '题目不能为空！'));
+						}
+					} catch (error) {
+						content.textContent = error instanceof Error ? error.message : String(error);
+					} finally {
+						activity?.release();
+						activity = undefined;
+						searching = false;
+						refreshButton();
 					}
 				};
 
@@ -1078,6 +1146,29 @@ export const CommonProject = Project.create({
 					button.onclick = () => {
 						search(this.cfg.searchValue);
 					};
+				});
+				const refreshButton = () => {
+					const active =
+						this === CommonProject.scripts.onlineSearch &&
+						CommonProject.scripts.settings.cfg.aiProvider === 'deepseek-web'
+							? getWebActivity()
+							: undefined;
+					button.disabled = searching || Boolean(active);
+					button.textContent = searching
+						? '搜索中…'
+						: active?.kind === 'work'
+						? '自动答题中，暂不可搜索'
+						: active
+						? '网页搜索中…'
+						: '搜索';
+					button.title = active ? webActivityMessage(active) : '';
+				};
+				watchWebActivity(button, refreshButton);
+				panel.configsContainer.querySelector('textarea')?.addEventListener('keydown', (event) => {
+					if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+						event.preventDefault();
+						search((event.target as HTMLTextAreaElement).value);
+					}
 				});
 				const searchContainer = h('div', { style: { textAlign: 'end' } }, [button]);
 
@@ -1131,9 +1222,9 @@ export const CommonProject = Project.create({
 				notes: {
 					defaultValue: '这里是一些其他的应用或者拓展功能。'
 				},
-					/**
-					 * 答案缓存
-					 */
+				/**
+				 * 答案缓存
+				 */
 				localQuestionCaches: {
 					defaultValue: [] as QuestionCache[],
 					extra: {
@@ -1143,65 +1234,21 @@ export const CommonProject = Project.create({
 			},
 			methods() {
 				return {
-					/**
-					 * 添加答案缓存
-					 */
-					addQuestionCache: async (...questionCacheItems: QuestionCache[]) => {
-						const questionCaches: QuestionCache[] = this.cfg.localQuestionCaches;
-						for (const item of questionCacheItems) {
-							// 去重
-							if (questionCaches.find((c) => c.title === item.title && c.answer === item.answer) === undefined) {
-								questionCaches.unshift(item);
-							}
-						}
-
-						// 限制数量
-						questionCaches.splice(200);
-						this.cfg.localQuestionCaches = questionCaches;
-					},
-					addQuestionCacheFromWorkResult(swr: SimplifyWorkResult[]) {
-						CommonProject.scripts.apps.methods.addQuestionCache(
-							...swr
-								.map((r) =>
-									r.searchInfos
-										.map((i) =>
-											i.results
-												.filter((res) => res[1])
-												.map((res) => ({
-													title: r.question,
-													answer: res[1],
-													from: i.name.replace(/【答案缓存】/g, ''),
-													homepage: i.homepage || '',
-													ai: Boolean((res[2] as any)?.ai)
-												}))
-												.flat()
-										)
-										.flat()
-								)
-								.flat()
-						);
-					},
-					/**
-					 * 使用答案缓存进行题目搜索
-					 * @param title 题目
-					 * @param whenSearchEmpty 当搜索结果为空，或者答案缓存功能被关闭时执行的函数
-					 */
 					searchAnswerInCaches: async (
 						title: string,
-						optionsOrWhenSearchEmpty:
-							| SearchAnswerOptions
-							| { (): SearchInformation[] | Promise<SearchInformation[]> },
+						optionsOrWhenSearchEmpty: SearchAnswerOptions | (() => SearchInformation[] | Promise<SearchInformation[]>),
 						whenSearchEmpty?: () => SearchInformation[] | Promise<SearchInformation[]>
 					): Promise<SearchInformation[]> => {
-						const searchOptions =
-							typeof optionsOrWhenSearchEmpty === 'function' ? ({} as SearchAnswerOptions) : optionsOrWhenSearchEmpty;
-
-						if (CommonProject.scripts.settings.cfg.enableQuestionCaches === false) {
-							return await searchAnswer(title, searchOptions);
-						}
-
-						return await searchAnswer(title, searchOptions);
-					},
+						const options = typeof optionsOrWhenSearchEmpty === 'function' ? {} : optionsOrWhenSearchEmpty;
+						const fallback =
+							typeof optionsOrWhenSearchEmpty === 'function' ? optionsOrWhenSearchEmpty : whenSearchEmpty;
+						const { webActivityId, providerConfig, ...question } = options;
+						const config = { ...(providerConfig || CommonProject.scripts.settings.cfg), webActivityId };
+						if (config.aiProvider === 'deepseek-web') assertWebActivity(webActivityId);
+						return questionCache.search(config, { title, ...question }, async () =>
+							fallback ? await fallback() : searchAnswer(title, question, config)
+						);
+					}
 				};
 			},
 			onrender({ panel }) {
@@ -1214,75 +1261,7 @@ export const CommonProject = Project.create({
 					cursor: 'pointer'
 				};
 
-				const cachesBtn = h('div', { innerText: '答案缓存', style: btnStyle }, (btn) => {
-					btn.onclick = () => {
-						const questionCaches = this.cfg.localQuestionCaches;
-
-						const list = questionCaches.map((c) =>
-							h(
-								'div',
-								{
-									className: 'question-cache',
-									style: {
-										margin: '8px',
-										border: '1px solid lightgray',
-										borderRadius: '4px',
-										padding: '8px'
-									}
-								},
-								[
-									h('div', { className: 'title' }, [
-										$ui.tooltip(
-											h(
-												'span',
-												{
-													title: `来自：${c.from || '未知来源'}\n主页：${c.homepage || '未知主页'}`,
-													style: { fontWeight: 'bold' }
-												},
-												c.title
-											)
-										)
-									]),
-									h('div', { className: 'answer', style: { marginTop: '6px' } }, c.answer)
-								]
-							)
-						);
-
-						const countEl = h('span', ['当前缓存数量：' + questionCaches.length]);
-
-						$modal.simple({
-							width: 800,
-							content: h('div', [
-								h('div', { className: 'notes card' }, [
-									$ui.notes([
-										'答案缓存会保存 AI 返回的题目和答案。重复题目可直接复用，减少接口请求。',
-										'默认最多缓存 200 题，当前页面关闭后会自动清除。'
-									])
-								]),
-								h('div', { className: 'card' }, [
-									$ui.space(
-										[
-											countEl,
-											$ui.button('清空答案缓存', {}, (btn) => {
-												btn.onclick = () => {
-													this.cfg.localQuestionCaches = [];
-													countEl.innerText = '当前缓存数量：0';
-													list.forEach((el) => el.remove());
-												};
-											})
-										],
-										{ separator: '|' }
-									)
-								]),
-
-								h(
-									'div',
-									questionCaches.length === 0 ? [h('div', { style: { textAlign: 'center' } }, '暂无答案缓存')] : list
-								)
-							])
-						});
-					};
-				});
+				const cachesBtn = h('button', { type: 'button', onclick: showQuestionCacheDialog }, '答案缓存');
 
 				const exportSetting = $ui.tooltip(
 					h(
@@ -1353,7 +1332,9 @@ export const CommonProject = Project.create({
 
 				const sep = (text: string) => h('div', { className: 'separator', style: { padding: '4px 0px' } }, text);
 
-				panel.body.replaceChildren(h('div', [sep('答案数据'), cachesBtn, sep('其他功能'), exportSetting, importSetting]));
+				panel.body.replaceChildren(
+					h('div', [sep('答案数据'), cachesBtn, sep('其他功能'), exportSetting, importSetting])
+				);
 			}
 		})
 	}
@@ -1373,65 +1354,157 @@ function insertCopyableStyle() {
 	document.head.append(style);
 }
 
+function visionStatusText() {
+	if (CommonProject.scripts.settings.cfg.aiProvider === 'deepseek-web') {
+		const bridge = getWebBridgeState();
+		return bridge
+			? bridge.supportsImages
+				? '网页已连接 · 支持图片 · 串行答题 · 模型请在专用网页启用前选择 · 不提供 token 用量'
+				: '专用标签页仍为旧版纯文本桥接，请刷新并重新启用后再发送图片题。'
+			: '网页未连接：打开专用标签页，登录后点击“启用此标签页”。支持图片，题目与附件会进入账号历史。';
+	}
+	const capability = getVisionCapability(CommonProject.scripts.settings.cfg);
+	if (capability.source === 'manual')
+		return capability.state === 'supported' ? '图片能力：已手动启用' : '图片能力：已设置仅文本';
+	if (capability.state === 'unsupported') return '图片能力：接口不支持，可更换模型或手动覆盖';
+	if (capability.state === 'unknown') return '图片能力：尚未确认，含图题先跳过；请检测或手动指定';
+	return (
+		'图片能力：' +
+		(capability.source === 'probe'
+			? '图片检测通过'
+			: capability.source === 'metadata'
+			? '接口声明支持图片'
+			: '接口已接受图片，识别能力尚未核验')
+	);
+}
+function updateVisionStatus() {
+	const settings = CommonProject.scripts.settings;
+	if (hasAnswerProvider(settings.cfg)) closeAIConfigEmptyWarning();
+	if (settings.cfg.aiModelSuggestionSource !== settings.cfg.aiApiUrl.trim())
+		settings.panel?.body.querySelector('datalist')?.replaceChildren();
+	const status = CommonProject.scripts.settings.panel?.body.querySelector('#xth-vision-status');
+	if (status) status.textContent = visionStatusText();
+	const web = settings.cfg.aiProvider === 'deepseek-web';
+	for (const key of [
+		'aiApiUrl',
+		'aiApiKey',
+		'aiModel',
+		'aiModelFetchButton',
+		'aiVisionMode',
+		'aiVisionTestButton',
+		'aiTemperature',
+		'aiMaxTokens',
+		'thread',
+		'aiUseResponseFormat'
+	]) {
+		const input = settings.panel?.querySelector<HTMLInputElement | HTMLSelectElement>(
+			'[id="common.settings.' + key + '"]'
+		);
+		if (input) {
+			input.disabled = web;
+			input.closest('config-element')?.toggleAttribute('data-web-disabled', web);
+		}
+	}
+	const connect = settings.panel?.querySelector('[id="common.settings.aiWebConnectButton"]');
+	connect?.closest('config-element')?.toggleAttribute('hidden', !web);
+}
+
+function showQuestionCacheDialog() {
+	const entries = questionCache.list();
+	const count = h('span', entries.length + ' / 200 题');
+	const list = h(
+		'div',
+		{ className: 'cache-list' },
+		entries.length
+			? entries.map((entry) =>
+					h('div', { className: 'question-cache' }, [h('div', entry.title), h('code', entry.answer)])
+			  )
+			: [h('div', { className: 'secondary' }, '暂无缓存')]
+	);
+	const clear = h('button', { type: 'button', disabled: entries.length === 0 }, '清空缓存');
+	clear.onclick = () => {
+		$modal.confirm({
+			title: '清空答案缓存',
+			content: '删除本地保存的答案？此操作不会删除 AI 设置。',
+			onConfirm: () => {
+				questionCache.clear();
+				count.textContent = '0 / 200 题';
+				clear.disabled = true;
+				list.replaceChildren(h('div', { className: 'secondary' }, '暂无缓存'));
+			}
+		});
+	};
+	$modal.simple({
+		title: '答案缓存',
+		width: 560,
+		content: h('div', [
+			h('div', { className: 'settings-actions' }, [count, clear]),
+			h('p', { className: 'secondary' }, '保存在本机，7 天有效；题型、选项顺序、图片或 AI 设置变化时不会复用旧答案。'),
+			list
+		])
+	});
+}
+
 const createGuide = () => {
-	const aiReady = hasAnswerProvider(CommonProject.scripts.settings.cfg);
-	const currentModel = CommonProject.scripts.settings.cfg.aiModel || '未选择';
-
-	const statusText = aiReady
-		? `AI 已配置，当前模型：${currentModel}`
-		: '还没有配置 AI。请先填写接口地址、API Key，并获取模型。';
-
-	const step = (title: string, desc: string) =>
-		h('div', { className: 'home-step' }, [
-			h('div', { className: 'home-step-title' }, title),
-			h('div', { className: 'secondary' }, desc)
+	const settings = CommonProject.scripts.settings;
+	const ready = hasAnswerProvider(settings.cfg);
+	const go = (script: Script) => {
+		$win?.pin(script).catch((error) => $message.error(String(error)));
+	};
+	const action = (title: string, subtitle: string, script: Script) =>
+		h('button', { type: 'button', className: 'home-action', onclick: () => go(script) }, [
+			h('b', title),
+			h('span', subtitle)
 		]);
-
-	const feature = (title: string, desc: string) =>
-		h('div', { className: 'home-feature' }, [h('b', title), h('div', { className: 'secondary' }, desc)]);
-
 	return h('div', { className: 'user-guide cx-ai-home' }, [
 		h('div', { className: 'home-hero' }, [
-			h('div', { className: 'home-title' }, '学习通AI辅助插件'),
-			h('div', { className: 'home-subtitle' }, '支持章节学习、作业考试自动答题、AI答案获取和 token 统计。'),
-			h('div', { className: aiReady ? 'home-status ready' : 'home-status' }, statusText)
+			h('h2', { className: 'home-title' }, ready ? '准备就绪' : '连接你的 AI'),
+			h(
+				'div',
+				{ className: 'home-status' + (ready ? ' ready' : '') },
+				ready
+					? settings.cfg.aiProvider === 'deepseek-web'
+						? 'DeepSeek 网页（实验）'
+						: settings.cfg.aiModel
+					: settings.cfg.aiProvider === 'deepseek-web'
+					? '请连接 DeepSeek 专用标签页'
+					: '填写接口、API Key 和模型即可开始'
+			),
+			h(
+				'button',
+				{ type: 'button', className: 'base-style-button', onclick: () => go(settings) },
+				ready ? '调整 AI 设置' : '配置 AI'
+			)
 		]),
-		h('div', { className: 'home-grid' }, [
-			h('div', { className: 'home-panel' }, [
-				h('div', { className: 'home-panel-title' }, '使用流程'),
-				step('1. 配置 AI', '填写接口地址和 API Key，点击 AI模型 获取并选择模型。'),
-				step('2. 进入答题页面', '打开课程任务点、章节测试、作业或考试预览页面。'),
-				step('3. 检查答题状态', '答案、AI标记、单题 token 和平均 token 会显示在答题结果中。')
-			]),
-			h('div', { className: 'home-panel' }, [
-				h('div', { className: 'home-panel-title' }, '当前能力'),
-				feature('答案来源', '仅使用 AI'),
-				feature('支持题型', '单选、多选、判断、填空。多选和判断已做 AI 输出兼容。')
-			])
+		h('div', { className: 'home-actions' }, [
+			action('课程学习', '查看学习设置', CXProject.scripts.study),
+			action('作业 / 考试', '查看答题结果', CommonProject.scripts.workResults),
+			action('手动搜题', '输入或划选题目', CommonProject.scripts.onlineSearch)
 		]),
-		h(
-			'a',
-			{
-				className: 'home-github-link',
-				href: 'https://github.com/yxxawa/xuexitong-ai-helper',
-				target: '_blank',
-				rel: 'noopener noreferrer'
-			},
-			'Github仓库'
-		)
+		h('div', { className: 'home-footer secondary' }, [
+			h('span', '外观跟随系统 · 缓存 ' + questionCache.list().length + ' 题'),
+			h(
+				'a',
+				{ href: 'https://github.com/yxxawa/xuexitong-ai-helper', target: '_blank', rel: 'noopener noreferrer' },
+				'项目主页'
+			)
+		]),
+		h('p', { className: 'secondary' }, 'AI 答案仅供参考，请核对后提交。')
 	]);
 };
 
 async function searchAnswer(
 	title: string,
-	searchOptions: SearchAnswerOptions
+	searchOptions: SearchAnswerOptions,
+	config: AIAnswererOptions = { ...CommonProject.scripts.settings.cfg }
 ): Promise<SearchInformation[]> {
-	const infos = await queryAIAnswerer(CommonProject.scripts.settings.cfg, {
+	const infos = await queryAIAnswerer(config, {
 		title,
 		type: searchOptions.type,
 		options: searchOptions.options,
 		lineOptions: searchOptions.lineOptions,
 		hasImage: searchOptions.hasImage,
+		unresolvedImageCount: searchOptions.unresolvedImageCount,
 		imageUrls: searchOptions.imageUrls
 	});
 	const error = infos.find((info) => info.error && isSkippedByAIConfig(info) === false)?.error;
@@ -1513,7 +1586,11 @@ function createSelectedQuestionAIAnswerPanel(result: SimplifyWorkResult) {
 							.filter(Boolean)
 							.map((item) => h('code', item))
 				  )
-				: h('span', { className: 'selected-ai-answer-empty' }, aiInfo?.error || '无可解析答案'),
+				: h(
+						'span',
+						{ className: 'selected-ai-answer-empty' },
+						aiInfo?.error || (result.requested ? '无可解析答案' : '等待 AI 回答…')
+				  ),
 			rawButton
 		]),
 		...(solution
@@ -1543,5 +1620,11 @@ function extractAIContent(response: any) {
 			.filter(Boolean)
 			.join('\n');
 	}
-	return response?.choices?.[0]?.message?.content || response?.choices?.[0]?.text || response?.answer || response?.data?.answer || '';
+	return (
+		response?.choices?.[0]?.message?.content ||
+		response?.choices?.[0]?.text ||
+		response?.answer ||
+		response?.data?.answer ||
+		''
+	);
 }

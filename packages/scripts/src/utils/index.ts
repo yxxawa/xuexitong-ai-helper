@@ -15,7 +15,6 @@ export interface CommonWorkOptions {
 	aiModel: string;
 	webActivityId?: string;
 	aiTemperature: number;
-	aiMaxTokens: number;
 	aiUseResponseFormat: boolean;
 	aiVisionMode?: 'auto' | 'support' | 'unsupported';
 	stopSecondWhenFinish: number;

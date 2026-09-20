@@ -298,17 +298,6 @@ export const CommonProject = Project.create({
 					},
 					defaultValue: 0
 				},
-				aiMaxTokens: {
-					label: 'AI最大输出',
-					attrs: {
-						type: 'number',
-						min: 50,
-						max: 2000,
-						step: 50,
-						title: '限制 AI 输出长度，避免返回过多解释。'
-					},
-					defaultValue: 700
-				},
 				aiUseResponseFormat: {
 					label: '强制JSON输出',
 					attrs: {
@@ -514,7 +503,6 @@ export const CommonProject = Project.create({
 								: Math.max(1, Math.min(8, parseInt(String(cfg.thread || 1), 10) || 1));
 						cfg.period = Math.max(1, parseInt(String(cfg.period || 1), 10) || 1);
 						cfg.aiTemperature = Number(cfg.aiTemperature ?? 0);
-						cfg.aiMaxTokens = Math.max(1, parseInt(String(cfg.aiMaxTokens || 700), 10) || 700);
 						cfg.stopSecondWhenFinish = Math.max(0, parseInt(String(cfg.stopSecondWhenFinish || 0), 10) || 0);
 						return cfg;
 					},
@@ -1400,7 +1388,6 @@ function updateVisionStatus() {
 		'aiVisionMode',
 		'aiVisionTestButton',
 		'aiTemperature',
-		'aiMaxTokens',
 		'thread',
 		'aiUseResponseFormat'
 	]) {

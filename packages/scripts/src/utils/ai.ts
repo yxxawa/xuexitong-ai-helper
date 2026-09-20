@@ -19,7 +19,6 @@ export interface AIAnswererOptions {
 	aiModel: string;
 	webActivityId?: string;
 	aiTemperature: number;
-	aiMaxTokens: number;
 	aiUseResponseFormat: boolean;
 	aiShowSolution?: boolean;
 	aiAnswerTimeout?: number;
@@ -373,6 +372,35 @@ export async function queryAIAnswerer(
 	}
 }
 
+/** Native Anthropic requires max_tokens. Use provider-reported model capacity, never a plugin/user cap. */
+const anthropicModelLimits = new Map<string, { expiresAt: number; value: Promise<number | undefined> }>();
+async function getAnthropicModelLimit(requestUrl: string, model: string, apiKey: string) {
+	const url = new URL(requestUrl);
+	url.pathname = url.pathname.replace(/\/messages\/?$/, '/models/') + encodeURIComponent(model);
+	const key = JSON.stringify([url.toString(), apiKey]); // In-memory only; never logged or persisted.
+	const cached = anthropicModelLimits.get(key);
+	if (cached && cached.expiresAt > Date.now()) return cached.value;
+	const entry = { expiresAt: Date.now() + 60 * 60 * 1000, value: Promise.resolve<number | undefined>(undefined) };
+	entry.value = request(url.toString(), {
+		type: 'GM_xmlhttpRequest',
+		method: 'get',
+		responseType: 'json',
+		headers: createAIHeaders('anthropic', apiKey),
+		timeout: 10000
+	})
+		.then((response) => {
+			const limit = response?.max_output_tokens ?? response?.data?.max_output_tokens;
+			if (Number.isSafeInteger(limit) && limit > 0) return limit as number;
+		})
+		.catch(() => undefined)
+		.then((limit) => {
+			if (limit === undefined) entry.expiresAt = Date.now() + 5 * 60 * 1000;
+			return limit;
+		});
+	if (anthropicModelLimits.size >= 32) anthropicModelLimits.delete(anthropicModelLimits.keys().next().value!);
+	anthropicModelLimits.set(key, entry);
+	return entry.value;
+}
 async function requestAI(
 	requestUrl: string,
 	provider: AIProvider,
@@ -380,16 +408,33 @@ async function requestAI(
 	data: Record<string, any>,
 	opts?: AIAnswererOptions
 ) {
-	const response = await request(requestUrl, {
-		type: 'GM_xmlhttpRequest',
-		method: 'post',
-		responseType: 'json',
-		headers: createAIHeaders(provider, apiKey),
-		timeout: Math.max(5000, Number(opts?.aiAnswerTimeout || 60) * 1000),
-		data
-	});
-	if (response?.error) throw Object.assign(new Error(normalizeErrorMessage(response)), { response });
-	return response;
+	if (provider === 'anthropic') {
+		const modelLimit = await getAnthropicModelLimit(requestUrl, data.model, apiKey);
+		if (modelLimit !== undefined) data.max_tokens = modelLimit;
+	}
+	try {
+		const response = await request(requestUrl, {
+			type: 'GM_xmlhttpRequest',
+			method: 'post',
+			responseType: 'json',
+			headers: createAIHeaders(provider, apiKey),
+			timeout: Math.max(5000, Number(opts?.aiAnswerTimeout || 60) * 1000),
+			data
+		});
+		if (response?.error) throw Object.assign(new Error(normalizeErrorMessage(response)), { response });
+		return response;
+	} catch (error) {
+		if (
+			provider === 'anthropic' &&
+			data.max_tokens === undefined &&
+			/max_tokens/i.test(normalizeErrorMessage(error)) &&
+			/required|missing|必填|缺少/i.test(normalizeErrorMessage(error))
+		)
+			throw new Error(
+				'此接口强制要求 max_tokens，但未提供模型最大输出信息；无法自动使用模型上限。请更换支持省略上限参数的兼容接口，或使用提供 max_output_tokens 的模型接口。'
+			);
+		throw error;
+	}
 }
 
 function createAIRequestBody(
@@ -438,7 +483,7 @@ function summarizeAIRequestData(data: Record<string, any>) {
 		system: data.system,
 		messages: sanitizeAIRequestData(data.messages),
 		temperature: data.temperature,
-		max_tokens: data.max_tokens,
+		...(data.max_tokens === undefined ? {} : { max_tokens: data.max_tokens }),
 		response_format: data.response_format
 	};
 }
@@ -579,7 +624,6 @@ function shouldRetryForEmptyFinalContent(response: any) {
 
 function createFinalJsonRetryData(provider: AIProvider, data: Record<string, any>, opts: AIAnswererOptions) {
 	const retryData = JSON.parse(JSON.stringify(data));
-	retryData.max_tokens = Math.max(Number(opts.aiMaxTokens || 700), opts.aiShowSolution ? 900 : 700);
 	const retryPrompt = opts.aiShowSolution
 		? '上次没有输出最终内容。不要继续推理，直接输出最终 json 对象，格式为 {"answer":"答案","answers":["答案"],"solution":"最多4行关键步骤"}。'
 		: '上次没有输出最终内容。不要继续推理，直接输出最终 json 对象，格式为 {"answer":"答案","answers":["答案"]}。';
@@ -1040,7 +1084,6 @@ function createAIRequestData(
 			model: opts.aiModel,
 			system,
 			temperature: Number(opts.aiTemperature ?? 0),
-			max_tokens: Number(opts.aiMaxTokens ?? 700),
 			messages: [
 				{
 					role: 'user',
@@ -1053,7 +1096,6 @@ function createAIRequestData(
 	return {
 		model: opts.aiModel,
 		temperature: Number(opts.aiTemperature ?? 0),
-		max_tokens: Number(opts.aiMaxTokens ?? 700),
 		messages: [
 			{
 				role: 'system',
@@ -1381,7 +1423,7 @@ export async function probeVisionModel(opts: AIAnswererOptions): Promise<string>
 	context.font = 'bold 56px sans-serif';
 	context.fillText(code, 30, 72);
 	const infos = await queryAIAnswerer(
-		{ ...opts, aiVisionMode: 'support', aiShowSolution: false, aiMaxTokens: 128, aiTemperature: 0 },
+		{ ...opts, aiVisionMode: 'support', aiShowSolution: false, aiTemperature: 0 },
 		{
 			title: '请读出图片中的四位数字。只输出 JSON，例如 {"answer":"数字","answers":["数字"]}。',
 			type: 'unknown',

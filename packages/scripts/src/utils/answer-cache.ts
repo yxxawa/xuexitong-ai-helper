@@ -37,9 +37,8 @@ export function questionCacheKey(opts: AIAnswererOptions, question: AIQuestionPa
 			endpoint:
 				opts.aiProvider === 'deepseek-web' ? 'https://chat.deepseek.com' : opts.aiApiUrl.trim().replace(/\/+$/, ''),
 			model: opts.aiProvider === 'deepseek-web' ? 'web' : opts.aiModel.trim(),
-			promptVersion: 'fixed-json-v4',
+			promptVersion: 'fixed-json-v5-unlimited-output',
 			temperature: opts.aiTemperature,
-			maxTokens: opts.aiMaxTokens,
 			solution: Boolean(opts.aiShowSolution),
 			format: opts.aiUseResponseFormat,
 			vision: opts.aiVisionMode || 'auto'

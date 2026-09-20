@@ -1,3 +1,5 @@
+import { completeJSONBlocks, parseJSONLike } from './answer-json';
+
 /** Native page uploads/submission; no cookies, access tokens, or CAPTCHA handling. */
 export interface WebImage {
 	name: string;
@@ -37,31 +39,28 @@ const visible = (element: HTMLElement) => !element.hidden && element.getClientRe
 
 /** Accept only a complete JSON object with the exact request nonce, never an old conversation's answer. */
 export function extractBridgeAnswer(text: string, requestId: string): string | undefined {
-	for (let start = text.indexOf('{'); start >= 0; start = text.indexOf('{', start + 1)) {
-		let depth = 0,
-			quoted = false,
-			escaped = false;
-		for (let i = start; i < text.length; i++) {
-			const char = text[i];
-			if (quoted) {
-				if (escaped) escaped = false;
-				else if (char === '\\') escaped = true;
-				else if (char === '"') quoted = false;
-			} else if (char === '"') quoted = true;
-			else if (char === '{') depth++;
-			else if (char === '}' && --depth === 0) {
-				try {
-					const value = JSON.parse(text.slice(start, i + 1));
-					if (value._bridge_id === requestId && (value.answer !== undefined || Array.isArray(value.answers)))
-						return JSON.stringify(value);
-				} catch {
-					/* Not a final JSON answer. */
-				}
-				break;
-			}
-		}
+	let answer: string | undefined;
+	for (const block of completeJSONBlocks(text)) {
+		const value = parseJSONLike(block);
+		if (
+			value &&
+			!Array.isArray(value) &&
+			value._bridge_id === requestId &&
+			(value.answer !== undefined || Array.isArray(value.answers))
+		)
+			answer = JSON.stringify(value);
 	}
-	return undefined;
+	return answer;
+}
+
+/** Recover rendered TeX from MathML annotations rather than reading duplicated visual glyphs. */
+function answerText(block: HTMLElement): string {
+	const clone = block.cloneNode(true) as HTMLElement;
+	for (const annotation of Array.from(clone.querySelectorAll('annotation[encoding="application/x-tex"]'))) {
+		const formula = annotation.closest('.katex, mjx-container') || annotation.closest('math');
+		if (formula) formula.replaceWith(clone.ownerDocument.createTextNode(annotation.textContent || ''));
+	}
+	return clone.innerText || clone.textContent || '';
 }
 
 function editor(): HTMLTextAreaElement | undefined {
@@ -213,7 +212,7 @@ export const deepSeekAdapter: WebChatAdapter = {
 		const blocks = Array.from(document.querySelectorAll<HTMLElement>('.ds-markdown')).reverse();
 		for (const block of blocks) {
 			if (!visible(block) || block.closest('[data-role="reasoning"], [class*="thinking"], .ds-think-content')) continue;
-			const result = extractBridgeAnswer(block.innerText || block.textContent || '', requestId);
+			const result = extractBridgeAnswer(answerText(block), requestId);
 			if (result && hasCompletedToolbar(block)) return result;
 		}
 	},

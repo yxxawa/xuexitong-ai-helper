@@ -8,6 +8,7 @@ export interface QuestionCache {
 	key: string;
 	title: string;
 	answer: string;
+	answerParts?: string[];
 	from: string;
 	homepage: string;
 	solution: string;
@@ -36,7 +37,7 @@ export function questionCacheKey(opts: AIAnswererOptions, question: AIQuestionPa
 			endpoint:
 				opts.aiProvider === 'deepseek-web' ? 'https://chat.deepseek.com' : opts.aiApiUrl.trim().replace(/\/+$/, ''),
 			model: opts.aiProvider === 'deepseek-web' ? 'web' : opts.aiModel.trim(),
-			promptVersion: 'fixed-json-v3',
+			promptVersion: 'fixed-json-v4',
 			temperature: opts.aiTemperature,
 			maxTokens: opts.aiMaxTokens,
 			solution: Boolean(opts.aiShowSolution),
@@ -73,6 +74,43 @@ export class QuestionAnswerCache {
 		// Keep in-flight deduplication: clearing stored answers must not duplicate a live request.
 		this.store.set([]);
 	}
+	/** Explicitly accepted corrections replace old entries and cannot be overwritten by older in-flight results. */
+	replaceAnswer(
+		opts: AIAnswererOptions,
+		question: AIQuestionPayload,
+		infos: SearchInformation[],
+		previousKeys: string[] = []
+	) {
+		const info = infos.find(
+			(info) => !info.error && !(info.data as any)?.skipped && info.results.some((result) => result.answer?.trim())
+		);
+		const result = info?.results.find((result) => result.answer?.trim());
+		if (!info || !result) throw new Error('检验结果无有效答案，缓存未更新。');
+		this.generation++;
+		const key = questionCacheKey(opts, question),
+			keys = new Set([key, ...previousKeys]);
+		const entries = this.list();
+		const corrected = {
+			answer: result.answer,
+			answerParts: safeAnswerParts(result.extra_data, result.answer),
+			solution: String((result.extra_data as any)?.solution || ''),
+			from: info.name,
+			homepage: info.homepage || '',
+			createdAt: Date.now()
+		};
+		// Even if cache is disabled now, correct an existing saved entry so later re-enabling cannot revive the old answer.
+		const updated = entries.map((entry) => (keys.has(entry.key) ? { ...entry, ...corrected } : entry));
+		this.store.set(
+			(this.store.enabled()
+				? [
+						{ version: 2 as const, key, title: question.title, ...corrected },
+						...updated.filter((entry) => entry.key !== key)
+				  ]
+				: updated
+			).slice(0, 200)
+		);
+	}
+
 	async search(
 		opts: AIAnswererOptions,
 		question: AIQuestionPayload,
@@ -95,6 +133,7 @@ export class QuestionAnswerCache {
 								ai: true,
 								cache_hit: true,
 								parsed_answer: hit.answer,
+								answer_parts: hit.answerParts,
 								solution: hit.solution,
 								token_usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
 							}
@@ -133,6 +172,7 @@ export class QuestionAnswerCache {
 						key,
 						title: question.title,
 						answer: result.answer,
+						answerParts: safeAnswerParts(result.extra_data, result.answer),
 						from: info.name,
 						homepage: info.homepage || '',
 						solution: String((result.extra_data as any)?.solution || ''),
@@ -148,4 +188,14 @@ export class QuestionAnswerCache {
 		this.pending.set(key, task);
 		return task;
 	}
+}
+
+function safeAnswerParts(extra: any, answer: string): string[] | undefined {
+	const parts = extra?.answer_parts;
+	return Array.isArray(parts) &&
+		parts.length &&
+		parts.every((part) => typeof part === 'string' && part.trim()) &&
+		parts.join('#') === answer
+		? [...parts]
+		: undefined;
 }

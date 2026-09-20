@@ -1887,3 +1887,32 @@ config-element[data-web-disabled] {
 		border-color: var(--xth-danger-border);
 	}
 }
+
+.question-review {
+	display: flex;
+	align-items: flex-start;
+	gap: 10px;
+	padding: 8px 0;
+	border-bottom: 1px solid var(--xth-border);
+}
+.question-review .review-check {
+	flex-shrink: 0;
+}
+.review-feedback {
+	color: var(--xth-muted);
+	min-width: 0;
+	overflow-wrap: anywhere;
+}
+.review-new-answer {
+	color: var(--xth-text);
+	background: var(--xth-surface);
+	border: 1px solid var(--xth-border);
+	border-radius: 6px;
+	padding: 8px;
+	margin: 6px 0;
+	white-space: pre-wrap;
+}
+.review-feedback button {
+	min-width: 36px;
+	margin-right: 8px;
+}

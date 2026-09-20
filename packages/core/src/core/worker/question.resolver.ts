@@ -306,11 +306,20 @@ export function createDefaultQuestionResolver<E>(
 		},
 		/** 填空题处理器 */
 		async completion(infos, options, handler) {
-			for (const answers of infos.map((info) => info.results.map((res) => res.answer))) {
-				// 排除空答案
-				let ans = answers.filter((ans) => ans);
-				if (ans.length === 1) {
-					ans = splitAnswer(ans[0], ctx.answerSeparators);
+			for (const info of infos) {
+				const results = info.results.filter((result) => result.answer?.trim());
+				let ans = results.map((result) => result.answer);
+				// One editor means one literal answer. Do not destroy |x|, TeX \;, or code punctuation.
+				if (ans.length === 1 && options.length > 1) {
+					const parts = (results[0].extra_data as any)?.answer_parts;
+					ans =
+						Array.isArray(parts) &&
+						parts.every((part) => typeof part === 'string' && part.trim()) &&
+						parts.join('#') === ans[0]
+							? parts
+							: (results[0].extra_data as any)?.ai
+							? ans[0].split('#')
+							: splitAnswer(ans[0], ctx.answerSeparators);
 				}
 
 				if (

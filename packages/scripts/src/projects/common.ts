@@ -1,3 +1,4 @@
+import { requestAnswerReview, getAnswerReviewView } from '../utils/answer-review';
 import {
 	acquireWebActivity,
 	assertWebActivity,
@@ -62,7 +63,7 @@ const state = {
 /**
  * 答案缓存类型
  */
-const questionCache = new QuestionAnswerCache({
+const questionCache: QuestionAnswerCache = new QuestionAnswerCache({
 	get: () => CommonProject.scripts.apps.cfg.localQuestionCaches,
 	set: (entries) => {
 		CommonProject.scripts.apps.cfg.localQuestionCaches = entries;
@@ -1234,6 +1235,12 @@ export const CommonProject = Project.create({
 			},
 			methods() {
 				return {
+					updateReviewedCache: (
+						opts: AIAnswererOptions,
+						question: import('../utils/ai').AIQuestionPayload,
+						infos: SearchInformation[],
+						previousKeys: string[]
+					): void => questionCache.replaceAnswer(opts, question, infos, previousKeys),
 					searchAnswerInCaches: async (
 						title: string,
 						optionsOrWhenSearchEmpty: SearchAnswerOptions | (() => SearchInformation[] | Promise<SearchInformation[]>),
@@ -1551,6 +1558,84 @@ function getAITokenStats(results: SimplifyWorkResult[]) {
 	};
 }
 
+function createAnswerReviewControls(id: string) {
+	const button = h(
+		'button',
+		{
+			type: 'button',
+			className: 'base-style-button review-check',
+			title: '重新请求 AI 检查页面上的当前答案；不会自动替换。'
+		},
+		'检验'
+	);
+	const feedback = h('div', { className: 'review-feedback', role: 'status' });
+	const box = h('div', { className: 'question-review' }, [button, feedback]);
+	const run = async (action: 'check' | 'accept' | 'reject', proposalId?: string) => {
+		const task = requestAnswerReview(id, action, proposalId);
+		render();
+		await task;
+		render();
+	};
+	button.onclick = () => {
+		void run('check');
+	};
+	let lastView = '';
+	const render = () => {
+		const view = getAnswerReviewView(id),
+			active = CommonProject.scripts.settings.cfg.aiProvider === 'deepseek-web' ? getWebActivity() : undefined;
+		button.disabled = Boolean(view?.busy || active);
+		button.textContent = view?.busy ? '处理中…' : '检验';
+		const state = JSON.stringify([view, Boolean(active)]);
+		if (state === lastView) return;
+		lastView = state;
+		feedback.replaceChildren();
+		if (view?.busy) {
+			feedback.textContent = '正在处理，请勿重复操作…';
+			return;
+		}
+		if (view?.error) {
+			feedback.textContent = view.error;
+			return;
+		}
+		if (!view?.feedback) return;
+		const value = view.feedback;
+		feedback.append(h('span', value.message));
+		if (value.status === 'different') {
+			feedback.append(h('pre', { className: 'review-new-answer' }, '新答案：' + value.answer));
+			const accept = h(
+				'button',
+				{
+					type: 'button',
+					className: 'base-style-button review-accept',
+					title: '采用新答案，并同步网页和缓存',
+					disabled: Boolean(active)
+				},
+				'√'
+			);
+			const reject = h(
+				'button',
+				{
+					type: 'button',
+					className: 'base-style-button-secondary review-reject',
+					title: '放弃新答案，保持原答案'
+				},
+				'×'
+			);
+			accept.setAttribute('aria-label', '采用新答案');
+			reject.setAttribute('aria-label', '保持原答案');
+			accept.onclick = () => {
+				void run('accept', value.proposalId);
+			};
+			reject.onclick = () => {
+				void run('reject', value.proposalId);
+			};
+			feedback.append(accept, reject);
+		}
+	};
+	watchWebActivity(box, render);
+	return box;
+}
+
 function createSelectedQuestionAIAnswerPanel(result: SimplifyWorkResult) {
 	const aiInfo = result.searchInfos.find((info) => info.name.includes('AI')) || result.searchInfos[0];
 	const firstResult = aiInfo?.results?.[0];
@@ -1575,6 +1660,7 @@ function createSelectedQuestionAIAnswerPanel(result: SimplifyWorkResult) {
 			h('span', { className: 'selected-ai-answer-label' }, '题目'),
 			h('span', { className: 'selected-ai-answer-text' }, result.question || '无题目')
 		]),
+		...(result.finish && result.reviewId ? [createAnswerReviewControls(result.reviewId)] : []),
 		h('div', { className: 'selected-ai-answer-row answer' }, [
 			h('span', { className: 'selected-ai-answer-label' }, 'AI答案'),
 			answer

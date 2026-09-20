@@ -1,3 +1,8 @@
+import { registerAnswerReview } from '../utils/answer-review';
+import { questionCacheKey } from '../utils/answer-cache';
+import { readPageAnswer } from '../utils/answer-input';
+import type { AIAnswererOptions, AIQuestionPayload } from '../utils/ai';
+import type { WorkContext, CustomWork } from '@xuexitong-ai-helper/core/src/core/worker/interface';
 import { acquireWebActivity } from '../utils/web-activity';
 import { fillTextAnswer, isOptionChecked, clearOtherMultipleOptions, fillGroupedChoices } from '../utils/answer-input';
 import { runQuestionPages } from '../utils/pagination';
@@ -723,6 +728,112 @@ export const CXProject = Project.create({
 	}
 });
 
+type CXTitleTransform = (titles: (HTMLElement | undefined)[], imageUrls?: string[]) => string;
+function describeCXQuestion(ctx: WorkContext<any>, titleTransform: CXTitleTransform): AIQuestionPayload {
+	const images = inspectQuestionImages([ctx.root]),
+		elements = ctx.elements as Record<string, HTMLElement[]>;
+	const title = titleTransform(elements.title || [], images.imageUrls);
+	const type =
+		resolveQuestionType(
+			elements,
+			ctx,
+			(elements.title || []).map((el: HTMLElement) => el?.textContent || '').join(' ')
+		) || 'unknown';
+	if (['single', 'multiple', 'judgement', 'completion'].includes(type)) ctx.type = type as typeof ctx.type;
+	const options =
+		type === 'completion'
+			? []
+			: (elements.options || []).map((option: HTMLElement) =>
+					questionOptionText(option, elements.options, images.imageUrls)
+			  );
+	const lineOptions =
+		type === 'line'
+			? collectLineOptionGroups(elements.lineSelectBox || [], images.imageUrls)
+			: type === 'reader' || type === 'fill'
+			? collectGroupedOptions(
+					type === 'reader' ? elements.reading || [] : elements.filling || [],
+					'span.saveSingleSelect[data]',
+					images.imageUrls
+			  )
+			: undefined;
+	return { title, type, options, lineOptions, ...images };
+}
+function searchCXQuestion(
+	ctx: WorkContext<any>,
+	transform: CXTitleTransform,
+	providerConfig: AIAnswererOptions,
+	webActivityId?: string
+) {
+	const question = describeCXQuestion(ctx, transform);
+	if (!question.title) throw new Error('题目为空，请等待页面加载后重试。');
+	if (question.type === 'unknown')
+		return [
+			{
+				name: 'AI做题',
+				results: [],
+				error: '无法识别本题题型，未发送请求；请手动核对。',
+				data: { skipped: true, reason: 'unknown_question_type' }
+			}
+		];
+	const { title, ...details } = question;
+	return CommonProject.scripts.apps.methods.searchAnswerInCaches(title, { ...details, providerConfig, webActivityId });
+}
+/** Register against the actual live root, including chapter roots owned by a nested frame. */
+function prepareCXQuestion(
+	ctx: WorkContext<any>,
+	worker: CourseWorker<any>,
+	transform: CXTitleTransform,
+	config: AIAnswererOptions
+) {
+	const initial = describeCXQuestion(ctx, transform);
+	const initialKey = questionCacheKey(config, initial);
+	const snapshot = () => {
+		const question = describeCXQuestion(ctx, transform);
+		return {
+			question,
+			answer:
+				readPageAnswer(question.type, (ctx.elements.options || []).filter(Boolean) as HTMLElement[], ctx.root) || ''
+		};
+	};
+	ctx.reviewId = registerAnswerReview(ctx.root, {
+		available() {
+			if (
+				!ctx.root.isConnected ||
+				(ctx.elements.title || []).some((el) => el && !ctx.root.contains(el)) ||
+				JSON.stringify(describeCXQuestion(ctx, transform)) !== JSON.stringify(initial)
+			)
+				throw new Error('原题页面已切换或题目发生变化，请重新读取后检验。');
+			if (worker.isRunning) throw new Error('请等待自动答题结束后再检验，暂停中的任务也需要先结束。');
+		},
+		snapshot,
+		options: () => ({ ...CommonProject.scripts.settings.cfg }),
+		async apply(infos) {
+			if (typeof worker.opts.work !== 'function') throw new Error('此题暂不支持自动替换答案。');
+			const result = await (worker.opts.work as CustomWork<any>)({
+				...ctx,
+				searchInfos: infos,
+				isCancelled: () => !ctx.root.isConnected
+			});
+			return result.finish;
+		},
+		async commit(opts, question, infos) {
+			const rows = (await CommonProject.scripts.workResults.methods.getResults()) || [];
+			const index = rows.findIndex((row) => row.reviewId === ctx.reviewId);
+			if (index < 0) throw new Error('原答题结果已被清空，请重新读取题目。');
+			ctx.searchInfos = infos;
+			rows[index] = simplifyWorkResult(
+				[{ requested: true, resolved: true, result: { finish: true }, ctx }],
+				() => question.title
+			)[0];
+			CommonProject.scripts.apps.methods.updateReviewedCache(opts, question, infos, [initialKey]);
+			await CommonProject.scripts.workResults.methods.setResults(rows);
+			CommonProject.scripts.workResults.methods.updateWorkStateByResults(rows);
+		}
+	});
+	const existing = snapshot();
+	return existing.answer ? { title: existing.question.title, answer: existing.answer } : undefined;
+}
+
 function workOrExam(
 	type: 'work' | 'exam' = 'work',
 	{
@@ -734,6 +845,7 @@ function workOrExam(
 		preview_mode,
 		questionIndexes,
 		appendOnly,
+		forceAnswer,
 		webActivityId,
 		...providerConfig
 	}: CommonWorkOptions & {
@@ -765,6 +877,7 @@ function workOrExam(
 	let pageResultsBefore: import('@xuexitong-ai-helper/core/src/core/worker/interface').SimplifyWorkResult[] = [];
 	/** 新建答题器 */
 	const worker = new CourseWorker({
+		forceAnswer,
 		root: '.questionLi',
 		elements: {
 			title: [
@@ -792,57 +905,8 @@ function workOrExam(
 			await recognizeSecretFontForQuestion(root);
 		},
 		/** 默认搜题方法构造器 */
-		answerer: (elements, ctx) => {
-			if (elements.title) {
-				// 处理作业和考试题目
-				const images = inspectQuestionImages([ctx.root]);
-				const title = workOrExamQuestionTitleTransform(elements.title, images.imageUrls);
-				if (title) {
-					const questionType =
-						resolveQuestionType(elements, ctx, elements.title.map((el) => el?.textContent || '').join(' ')) ||
-						'unknown';
-					if (['single', 'multiple', 'judgement', 'completion'].includes(questionType))
-						ctx.type = questionType as typeof ctx.type;
-					if (questionType === 'unknown')
-						return [
-							{
-								name: 'AI做题',
-								results: [],
-								error: '无法识别本题题型，未发送请求；请手动核对。',
-								data: { skipped: true, reason: 'unknown_question_type' }
-							}
-						];
-					// The entire question is inspected, including pictures outside option text spans.
-					const { imageUrls } = images;
-					const options =
-						questionType === 'completion'
-							? []
-							: ctx.elements.options.map((option) => questionOptionText(option, ctx.elements.options, imageUrls));
-					const lineOptions =
-						questionType === 'line'
-							? collectLineOptionGroups(ctx.elements.lineSelectBox, imageUrls)
-							: questionType === 'reader' || questionType === 'fill'
-							? collectGroupedOptions(
-									questionType === 'reader' ? ctx.elements.reading : ctx.elements.filling,
-									'span.saveSingleSelect[data]',
-									imageUrls
-							  )
-							: undefined;
-					return CommonProject.scripts.apps.methods.searchAnswerInCaches(title, {
-						webActivityId,
-						providerConfig,
-						type: questionType,
-						options,
-						lineOptions,
-						...images
-					});
-				} else {
-					throw new Error('题目为空，请查看题目是否为空，或者忽略此题');
-				}
-			} else {
-				throw new Error('题目为空，请查看题目是否为空，或者忽略此题');
-			}
-		},
+		answerer: (_elements, ctx) =>
+			searchCXQuestion(ctx, workOrExamQuestionTitleTransform, providerConfig, webActivityId),
 
 		work: async (ctx) => {
 			const { elements, searchInfos } = ctx;
@@ -923,10 +987,15 @@ function workOrExam(
 		}
 	});
 
+	worker.opts.readAnswer = (ctx) => prepareCXQuestion(ctx, worker, workOrExamQuestionTitleTransform, providerConfig);
+
 	const run = async () => {
 		try {
-			if (preview_mode) await worker.doWork({ questionIndexes });
-			else {
+			if (preview_mode) {
+				const results = await worker.doWork({ questionIndexes });
+				if (results.length && results.every((result) => result.result?.preAnswered))
+					$message.success('全部题目已答完，已跳过，无需重复请求 AI。');
+			} else {
 				await runQuestionPages({
 					closed: () => worker.isClose,
 					identity: () =>
@@ -1942,45 +2011,8 @@ const JobRunner = {
 				answerSeparators: answerSeparators.split(',').map((s) => s.trim()),
 				answerMatchMode: answerMatchMode,
 				/** 默认搜题方法构造器 */
-				answerer: (elements, ctx) => {
-					const images = inspectQuestionImages([ctx.root]);
-					const title = chapterTestTaskQuestionTitleTransform(elements.title, images.imageUrls);
-					if (title) {
-						const questionType =
-							resolveQuestionType(elements, ctx, elements.title.map((el) => el?.textContent || '').join(' ')) ||
-							'unknown';
-						if (['single', 'multiple', 'judgement', 'completion'].includes(questionType))
-							ctx.type = questionType as typeof ctx.type;
-						if (questionType === 'unknown')
-							return [
-								{
-									name: 'AI做题',
-									results: [],
-									error: '无法识别本题题型，未发送请求；请手动核对。',
-									data: { skipped: true, reason: 'unknown_question_type' }
-								}
-							];
-						// The entire question is inspected, including pictures outside option text spans.
-						const { imageUrls } = images;
-						const options =
-							questionType === 'completion'
-								? []
-								: ctx.elements.options.map((option) => questionOptionText(option, ctx.elements.options, imageUrls));
-						const lineOptions =
-							questionType === 'line' ? collectLineOptionGroups(ctx.elements.lineSelectBox, imageUrls) : undefined;
-
-						return CommonProject.scripts.apps.methods.searchAnswerInCaches(title, {
-							webActivityId: activity?.id,
-							providerConfig,
-							type: questionType,
-							options,
-							lineOptions,
-							...images
-						});
-					} else {
-						throw new Error('题目为空，请查看题目是否为空，或者忽略此题');
-					}
-				},
+				answerer: (_elements, ctx) =>
+					searchCXQuestion(ctx, chapterTestTaskQuestionTitleTransform, providerConfig, activity?.id),
 
 				work: async (ctx) => {
 					const { elements, searchInfos } = ctx;
@@ -2127,6 +2159,8 @@ const JobRunner = {
 					}
 				}
 			});
+			worker.opts.readAnswer = (ctx) =>
+				prepareCXQuestion(ctx, worker, chapterTestTaskQuestionTitleTransform, providerConfig);
 
 			const results = await worker.doWork();
 

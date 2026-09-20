@@ -107,6 +107,24 @@ export class CourseWorker<E extends RawElements = RawElements> extends CommonEve
 							? this.opts.work.type
 							: this.opts.work.type(ctx);
 				}
+				const existing = await this.opts.readAnswer?.(ctx);
+				if (existing?.answer && !this.opts.forceAnswer) {
+					ctx.searchInfos = [
+						{
+							name: '页面已有答案',
+							data: { existing_answer: true },
+							results: [
+								{
+									question: existing.title,
+									answer: existing.answer,
+									extra_data: { existing_answer: true, parsed_answer: existing.answer }
+								}
+							]
+						}
+					];
+					result.requested = result.resolved = true;
+					result.result = { finish: true, preAnswered: true };
+				}
 			} catch (error) {
 				result.error = String(error);
 				result.requested = true;
@@ -175,6 +193,7 @@ export class CourseWorker<E extends RawElements = RawElements> extends CommonEve
 				await requested[index];
 				if (!(await this.ready())) return;
 				const result = results[index];
+				if (result.resolved && result.result?.finish) continue;
 				const ctx = result.ctx!;
 				try {
 					if (result.error) throw new Error(result.error);

@@ -55,6 +55,13 @@ export function collectQuestionImageUrls(...groups: (HTMLElement | undefined)[][
 export function questionElementText(root: HTMLElement, imageUrls: string[]): string {
 	const sources = imagesIn(root).map(visualURL);
 	const clone = root.cloneNode(true) as HTMLElement;
+	clone.querySelectorAll<HTMLElement>('[data-xth-image-ref], span').forEach((node) => {
+		if (
+			node.hasAttribute('data-xth-image-ref') ||
+			(node.style.fontSize === '0px' && sources.includes(node.textContent?.trim() || ''))
+		)
+			node.remove();
+	});
 	for (const [imageIndex, img] of imagesIn(clone).entries()) {
 		const index = imageUrls.indexOf(sources[imageIndex]);
 		const marker = index >= 0 ? '[图片' + (index + 1) + ']' : '[图片无法读取]';

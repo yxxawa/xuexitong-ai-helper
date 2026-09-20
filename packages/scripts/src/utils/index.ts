@@ -24,6 +24,7 @@ export interface CommonWorkOptions {
 	answerMatchMode: AnswerMatchMode;
 	questionIndexes?: number[];
 	appendOnly?: boolean;
+	forceAnswer?: boolean;
 }
 
 /** 创建答题预处理信息 */

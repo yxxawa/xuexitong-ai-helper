@@ -3,14 +3,10 @@
 	"version": "1.0.2",
 	"description": "学习通 AI 辅助插件，支持自定义 AI 接口、自动答题、手动搜题和章节学习。",
 	"scripts": {
-		"test": "node --test",
-		"test:browser": "node tests/browser-smoke.cjs && node tests/browser-bridge.cjs && node tests/browser-deepseek-images.cjs",
 		"dev": "gulp -f ./scripts/dev-core.js",
 		"build": "gulp -f ./scripts/build-core.js",
 		"typecheck": "pnpm --filter @xuexitong-ai-helper/utils exec tsc --noEmit && pnpm --filter @xuexitong-ai-helper/core exec tsc --noEmit && pnpm --filter @xuexitong-ai-helper/scripts exec tsc --noEmit",
-		"tsc": "gulp -f ./scripts/tsc.js",
-		"lint": "pnpm format && eslint  ./packages --ext .ts,.tsx,.js,.jsx --fix",
-		"format": "prettier -c ./.prettierrc.json  **/*.ts  **/*.js  **/*.css  --write"
+		"tsc": "gulp -f ./scripts/tsc.js"
 	},
 	"devDependencies": {
 		"@html-eslint/eslint-plugin": "^0.15.0",

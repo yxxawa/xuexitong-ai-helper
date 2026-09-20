@@ -25,6 +25,8 @@ export type AnswerMatchMode = 'exact' | 'similar';
 
 /** 答题器上下文 */
 export interface WorkContext<E> {
+	/** Ephemeral action target; contains no DOM or credentials in stored results. */
+	reviewId?: string;
 	/** Re-check before each asynchronous DOM write, not just before resolving a question. */
 	isCancelled?: () => boolean;
 	root: HTMLElement;
@@ -64,6 +66,7 @@ export interface WorkResult<E extends RawElements> {
  * 为什么不直接用 {@link WorkResult} ，因为对象里太多嵌套对象，一旦结果超过10个以上，可能导致 I/O 变慢，并且页面卡顿。
  */
 export interface SimplifyWorkResult {
+	reviewId?: string;
 	/** 题目 */
 	question: string;
 	/** 题目类型 */
@@ -200,6 +203,11 @@ export type AnswererType<E> = (
  * 答题器参数
  */
 export interface WorkOptions<E extends RawElements> {
+	/** Read a complete answer from the live page; undefined means not fully answered. */
+	readAnswer?: (
+		ctx: WorkContext<E>
+	) => { answer: string; title: string } | undefined | Promise<{ answer: string; title: string } | undefined>;
+	forceAnswer?: boolean;
 	/** 父元素 */
 	root: string | HTMLElement[];
 	/** dom元素解析器，可以在 WorkContext.elements 中使用解析后的元素 */

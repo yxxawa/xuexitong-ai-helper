@@ -1,3 +1,4 @@
+import { parseJSONLike, AI_JSON_ESCAPE_HINT } from './answer-json';
 import { getWebBridgeState, requestWebAnswer } from './web-ai';
 import {
 	getVisionCapability,
@@ -26,6 +27,7 @@ export interface AIAnswererOptions {
 }
 
 export interface AIQuestionPayload {
+	reviewAnswer?: string;
 	title: string;
 	type?: QuestionTypes | string;
 	options?: string[] | string;
@@ -181,6 +183,7 @@ export async function queryAIAnswerer(
 	const promptTitle = replaceImageUrlsWithMarkers(title, imageUrls) || (imageUrls.length ? '见图片' : title);
 
 	const userPrompt = [
+		createReviewHint(question.reviewAnswer),
 		`题型：${questionTypeName}`,
 		imageUrls.length ? createImageMarkerHint(imageUrls.length) : '',
 		createChoiceOutputHint(question.type, options),
@@ -327,6 +330,7 @@ export async function queryAIAnswerer(
 									token_usage: tokenUsage,
 									raw_content: rawContent || getAIReasoningContentForDisplay(response),
 									parsed_answer: normalizedAnswer,
+									answer_parts: completionAnswerParts(rawContent, question.type),
 									solution,
 									retry: retryInfo
 								}
@@ -623,22 +627,24 @@ function readTextContent(content: any) {
 
 function resolveAIAnswer(rawContent: any) {
 	if (Array.isArray(rawContent)) {
-		return rawContent.map(String).join('#').trim();
+		return pickAnswerFromObject(rawContent);
 	}
 
 	if (rawContent && typeof rawContent === 'object') {
 		return pickAnswerFromObject(rawContent);
 	}
 
-	const content = String(rawContent || '').trim();
+	const content = String(rawContent ?? '').trim();
 	if (!content) {
 		return '';
 	}
 
 	const parsed = parseJSONLike(content);
-	if (parsed) {
+	if (parsed !== undefined) {
 		return pickAnswerFromObject(parsed);
 	}
+	// Never paste a malformed JSON packet into a completion input as if it were an answer.
+	if (/^(?:```(?:json)?\s*)?[{\[]/.test(content)) return '';
 
 	return content
 		.replace(/^```(?:json)?/i, '')
@@ -647,26 +653,25 @@ function resolveAIAnswer(rawContent: any) {
 }
 
 function pickAnswerFromObject(obj: any): string {
-	const answer =
-		(Array.isArray(obj?.answers) && obj.answers.length ? obj.answers : undefined) ??
-		obj?.answer ??
-		obj?.answers ??
-		obj?.result ??
-		obj?.data?.answer ??
-		obj?.data?.answers ??
-		obj?.data?.result ??
-		obj?.choices?.[0]?.message?.answer ??
-		obj?.choices?.[0]?.message?.answers;
-	if (Array.isArray(answer)) {
-		return answer
-			.map((item) => pickAnswerFromObject(item) || String(item))
-			.join('#')
-			.trim();
+	if (obj == null) return '';
+	if (typeof obj !== 'object') return String(obj).trim();
+	if (Array.isArray(obj)) {
+		const parts = obj.map(pickAnswerFromObject);
+		return parts.length && parts.every(Boolean) ? parts.join('#') : '';
 	}
-	if (answer && typeof answer === 'object') {
-		return pickAnswerFromObject(answer);
+	for (const candidate of [obj.answers, obj.answer, obj.result, obj.data, obj.choices?.[0]?.message]) {
+		const answer = pickAnswerFromObject(candidate);
+		if (answer) return answer;
 	}
-	return String(answer ?? '').trim();
+	return '';
+}
+function completionAnswerParts(rawContent: any, type: AIQuestionPayload['type']): string[] | undefined {
+	if (!isCompletionQuestion(type)) return;
+	const parsed = typeof rawContent === 'object' ? rawContent : parseJSONLike(String(rawContent ?? ''));
+	const values = Array.isArray(parsed) ? parsed : parsed?.answers ?? parsed?.data?.answers;
+	if (!Array.isArray(values) || !values.length) return;
+	const parts = values.map((value) => normalizeAnswerByQuestionType(pickAnswerFromObject(value), type));
+	return parts.every(Boolean) ? parts : undefined;
 }
 
 function resolveAISolution(rawContent: any, response?: any): string {
@@ -709,8 +714,18 @@ function normalizeAISolution(solution: string) {
 		.trim();
 }
 
+function createReviewHint(answer?: string) {
+	return answer === undefined
+		? ''
+		: [
+				'本次任务是检验已作答题目。请独立核对题干、全部选项及图片，不要仅附和当前答案，也不要引用此前题目的答案。',
+				'当前答案：' + answer,
+				'若当前答案正确，返回相同答案；否则返回你认为正确的新答案。仍严格使用本题要求的 JSON 格式，不要只回答“正确/错误”。'
+		  ].join('\n');
+}
+
 function createSystemPrompt(type: AIQuestionPayload['type'], showSolution?: boolean) {
-	const basePrompt = [showSolution ? AI_SOLUTION_PROMPT : DEFAULT_AI_PROMPT];
+	const basePrompt = [showSolution ? AI_SOLUTION_PROMPT : DEFAULT_AI_PROMPT, AI_JSON_ESCAPE_HINT];
 
 	if (isSingleQuestion(type)) {
 		return [
@@ -774,13 +789,8 @@ export function normalizeAnswerByQuestionType(
 	}
 
 	if (isCompletionQuestion(type)) {
-		return answer
-			.replace(/^答案[:：]\s*/g, '')
-			.replace(/\n+/g, '#')
-			.replace(/[；;|]+/g, '#')
-			.replace(/#+/g, '#')
-			.replace(/^#|#$/g, '')
-			.trim();
+		// A formula may contain |x|, \\;, newlines or literal #. Only the answer array defines blanks.
+		return answer.replace(/^答案[:：]\s*/g, '').trim();
 	}
 	if (isJudgementQuestion(type)) {
 		const truth = (text: string) =>
@@ -868,21 +878,21 @@ type AIAnswerContext = {
 };
 
 function normalizeSingleAnswer(answer: string, options: string[] = [], _context: AIAnswerContext = {}) {
-	const clean = answer
-		.replace(/^(?:(?:正确|最终)?答案|选项)\s*(?:是|为|[:：])?\s*/, '')
-		.replace(/[。.!！\s]+$/g, '')
-		.trim();
+	const literal = answer.replace(/^(?:(?:正确|最终)?答案|选项)\s*(?:是|为|[:：])?\s*/, '').trim();
+	const clean = literal.replace(/[。.\s]+$/g, '').trim();
 	const optionCount = options.length || 26;
-	if (/^[A-Z]$/i.test(clean)) return isChoiceLetterInRange(clean.toUpperCase(), optionCount) ? clean.toUpperCase() : '';
-	// Check exact option text first: a numeric option such as "42" is not option number 42.
-	const index = options.findIndex((option) => {
-		const text = compactPromptText(option).toLowerCase();
-		return (
-			text === compactPromptText(clean).toLowerCase() ||
-			text.replace(/^[a-z][.．、]\s*/, '') === compactPromptText(clean).toLowerCase()
-		);
-	});
-	if (index >= 0) return String.fromCharCode(65 + index);
+	if (/^[A-Z]$/i.test(literal))
+		return isChoiceLetterInRange(literal.toUpperCase(), optionCount) ? literal.toUpperCase() : '';
+	// Match literal text before removing punctuation: n! must not accidentally match n.
+	const optionTexts = options.map((option) => compactPromptText(option).replace(/^[A-Z][.．、]\s*/i, ''));
+	for (const value of [literal, clean]) {
+		const exact = optionTexts.indexOf(compactPromptText(value));
+		if (exact >= 0) return String.fromCharCode(65 + exact);
+	}
+	const folded = optionTexts.flatMap((text, index) =>
+		text.toLowerCase() === compactPromptText(clean).toLowerCase() ? [index] : []
+	);
+	if (folded.length === 1) return String.fromCharCode(65 + folded[0]);
 	const letter = clean.match(/^(?:选择?|选项)?\s*([A-Z])(?:[.．、:：]\s*.*)?$/i)?.[1]?.toUpperCase();
 	if (letter && isChoiceLetterInRange(letter, optionCount)) return letter;
 	if (/^\d+$/.test(clean) && Number(clean) >= 1 && Number(clean) <= optionCount)
@@ -986,23 +996,6 @@ function mergeTokenUsage(a: ReturnType<typeof resolveTokenUsage>, b: ReturnType<
 		completion_tokens: a.completion_tokens + b.completion_tokens,
 		total_tokens: a.total_tokens + b.total_tokens
 	};
-}
-
-function parseJSONLike(content: string) {
-	const candidates = [
-		content,
-		content
-			.replace(/^```(?:json)?/i, '')
-			.replace(/```$/i, '')
-			.trim(),
-		content.slice(content.indexOf('{'), content.lastIndexOf('}') + 1)
-	].filter(Boolean);
-
-	for (const candidate of candidates) {
-		try {
-			return JSON.parse(candidate);
-		} catch {}
-	}
 }
 
 function resolveHomepage(url: string) {
@@ -1448,6 +1441,7 @@ async function queryWebAnswerer(opts: AIAnswererOptions, question: AIQuestionPay
 		);
 		const prompt = [
 			createSystemPrompt(question.type, opts.aiShowSolution),
+			createReviewHint(question.reviewAnswer),
 			'这是独立题目，请勿引用此前题目。',
 			'题型：' + getQuestionTypeLabel(question.type),
 			createChoiceOutputHint(question.type, options),
@@ -1485,6 +1479,7 @@ async function queryWebAnswerer(opts: AIAnswererOptions, question: AIQuestionPay
 									ai: true,
 									raw_content: rawContent,
 									parsed_answer: answer,
+									answer_parts: completionAnswerParts(rawContent, question.type),
 									solution,
 									usage_unavailable: true
 								}

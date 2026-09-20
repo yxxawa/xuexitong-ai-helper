@@ -1,0 +1,27 @@
+# Dependencies and build output
+node_modules/
+dist/
+lib/
+# The patched UI dependency is source-of-truth vendor code, not generated output.
+!vendor/easy-us/lib/
+!vendor/easy-us/lib/**
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+# Test/build caches and logs
+test-results/
+coverage/
+.cache/
+*.log
+*.tsbuildinfo
+stats.html
+# Archives, editor and OS files
+*.zip
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+# This repository uses pnpm only
+package-lock.json
+yarn.lock

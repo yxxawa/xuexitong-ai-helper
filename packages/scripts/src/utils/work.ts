@@ -1,3 +1,4 @@
+import { assertQuestionReviewIdle } from './answer-review';
 import {
 	acquireWebActivity,
 	getWebActivity,
@@ -150,25 +151,21 @@ export function commonWork(
 		if (starting || (running && !replace)) return;
 		starting = true;
 		try {
+			assertQuestionReviewIdle();
 			if (replace) {
 				if (running) $message.info('正在停止；等待已发出的请求返回后重启，避免重复请求。');
 				worker?.emit('close');
 				// Let an already sent request settle before replacing its worker; do not send it twice.
 				await (worker as any)?.waitForIdle?.();
 				running = false;
-				if (unfinished) {
-					questionIndexes = await getUnfinishedQuestionIndexes();
-					if (!questionIndexes.length) {
-						$message.info('没有检测到未完成题。');
-						return;
-					}
-				}
+
 				await options.onRestart?.();
 			}
 			const workOptions: CommonWorkOptions = {
 				...getWorkOptions(),
 				questionIndexes,
-				appendOnly: Boolean(questionIndexes?.length)
+				appendOnly: Boolean(questionIndexes?.length),
+				forceAnswer: replace && !unfinished
 			};
 			if (!hasAnswerProvider(workOptions)) {
 				checkFailed = true;
@@ -279,23 +276,6 @@ export function createWorkerControl(options: {
 	return { startBtn, completeBtn, restartBtn, controlBtn };
 }
 
-async function getUnfinishedQuestionIndexes() {
-	const results = (await CommonProject.scripts.workResults.methods.getResults?.()) || [];
-	return results.reduce<number[]>((indexes, result, index) => {
-		const hasAnswer = result.searchInfos.some((info) => info.results.some((answer) => answer[1]?.trim()));
-		if (
-			result.requested === false ||
-			result.resolved === false ||
-			result.finish !== true ||
-			Boolean(result.error?.trim()) ||
-			hasAnswer === false
-		) {
-			indexes.push(index);
-		}
-		return indexes;
-	}, []);
-}
-
 /**
  * 图片识别，将图片链接追加到 text 中
  * 返回一个克隆的节点
@@ -313,6 +293,7 @@ export function optimizationElementWithImage(root: HTMLElement, clone_node: bool
 		}
 
 		const src = document.createElement('span');
+		src.setAttribute('data-xth-image-ref', '');
 		src.innerText = getQuestionImageURL(img);
 		// 隐藏图片，但不影响 innerText 的获取
 		src.style.fontSize = '0px';
@@ -352,6 +333,7 @@ export function simplifyWorkResult(
 				.join('<br>') ||
 			'';
 		res.push({
+			reviewId: wr.ctx?.reviewId,
 			requested: wr.requested,
 			resolved: wr.resolved,
 			error: wr.error,

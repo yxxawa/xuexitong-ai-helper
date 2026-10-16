@@ -1,3 +1,4 @@
+import { waitForAI, type AIRequestControl } from './request-control';
 import { assertWebActivity, serviceWebActivities } from './web-activity';
 import { deepSeekAdapter, validateWebImages, type WebChatAdapter, type WebImage } from './deepseek-web';
 
@@ -21,6 +22,7 @@ export interface BridgeState {
 	id: string;
 	supportsImages?: boolean;
 	supportsActivities?: boolean;
+	supportsPause?: boolean;
 	conversationUses?: number;
 	provider: string;
 	instance: string;
@@ -36,6 +38,9 @@ interface WebRequest {
 	startedAt?: number;
 	deadlineAt?: number;
 	rateLimitRetries?: number;
+	paused?: boolean;
+	pausedAt?: number;
+	pausedTotal?: number;
 	timeout: number;
 	prompt?: string;
 	images?: WebImage[];
@@ -67,12 +72,16 @@ export async function requestWebAnswer(
 	prompt: string,
 	timeoutSeconds = 180,
 	images: WebImage[] = [],
-	activityId?: string
+	activityId?: string,
+	control: AIRequestControl = {}
 ): Promise<string> {
+	await waitForAI(control);
 	const bridge = getWebBridgeState();
 	if (!bridge) throw new Error('DeepSeek 网页未连接。请打开专用标签页，登录并点击“启用此标签页”。');
 	if (!prompt.trim() || prompt.length > 60000) throw new Error('网页请求为空或过长（上限 60000 字符）。');
 	assertWebActivity(activityId);
+	if (control.isPaused && bridge.supportsPause !== true)
+		throw new Error('请刷新 DeepSeek 专用标签页并重新启用，以使用暂停/停止控制。');
 	validateWebImages(images);
 	if (images.length && bridge.supportsImages !== true)
 		throw new Error('专用标签页仍是旧版纯文本桥接，请刷新并重新启用；图片题未发送。');
@@ -95,17 +104,33 @@ export async function requestWebAnswer(
 	wakeWebBridge();
 	try {
 		for (;;) {
-			const current = GM_getValue<WebRequest | undefined>(key, undefined);
+			if (control.isCancelled?.()) throw new Error('请求已取消，已停止重试。');
+			let current = GM_getValue<WebRequest | undefined>(key, undefined);
 			if (!current) throw new Error('网页请求已取消。');
 			if (current.status === 'done' && typeof current.answer === 'string') return current.answer;
 			if (current.status === 'error' || current.status === 'cancelled')
 				throw new Error(current.error || '网页请求已中断。');
+			const paused = Boolean(control.isPaused?.());
+			if (paused !== Boolean(current.paused)) {
+				const elapsed = !paused && current.pausedAt ? Date.now() - current.pausedAt : 0;
+				current = {
+					...current,
+					paused,
+					pausedAt: paused ? Date.now() : undefined,
+					pausedTotal: (current.pausedTotal || 0) + elapsed,
+					createdAt: current.createdAt + elapsed,
+					deadlineAt: current.deadlineAt ? current.deadlineAt + elapsed : undefined
+				};
+				GM_setValue(key, current);
+				wakeWebBridge();
+			}
 			const receiver = getWebBridgeState();
 			if (!receiver || receiver.id !== bridge.id)
 				throw new Error('专用网页已断开或被暂停；不会自动重发，请检查该标签页。');
 			if (
-				Date.now() - request.createdAt > QUEUE_TIMEOUT ||
-				(current.startedAt && Date.now() > (current.deadlineAt || current.startedAt + request.timeout))
+				!paused &&
+				(Date.now() - current.createdAt > QUEUE_TIMEOUT ||
+					(current.startedAt && Date.now() > (current.deadlineAt || current.startedAt + request.timeout)))
 			) {
 				GM_setValue(key, { ...current, status: 'cancelled', prompt: undefined, images: undefined });
 				throw new Error(
@@ -165,6 +190,7 @@ export function startDeepSeekBridge(adapter: WebChatAdapter = deepSeekAdapter) {
 				provider: adapter.id,
 				supportsImages: adapter.supportsImages === true,
 				supportsActivities: true,
+				supportsPause: true,
 				conversationUses,
 				status: state,
 				updatedAt: Date.now()
@@ -192,11 +218,12 @@ export function startDeepSeekBridge(adapter: WebChatAdapter = deepSeekAdapter) {
 			const waiting: [string, WebRequest][] = [];
 			for (const key of GM_listValues().filter((key) => key.startsWith(REQUEST_PREFIX))) {
 				const req = GM_getValue<WebRequest | undefined>(key, undefined);
-				if (!req || now - req.createdAt > QUEUE_TIMEOUT) {
+				if (req && req.bridgeId !== owner) continue;
+				if (!req || (!req.paused && now - req.createdAt > QUEUE_TIMEOUT)) {
 					GM_deleteValue(key);
 					continue;
 				}
-				if (req.bridgeId === owner && req.status === 'queued') waiting.push([key, req]);
+				if (req.bridgeId === owner && req.status === 'queued' && !req.paused) waiting.push([key, req]);
 			}
 			waiting.sort((a, b) => a[1].createdAt - b[1].createdAt);
 			if (!waiting.length) return;
@@ -228,21 +255,37 @@ export function startDeepSeekBridge(adapter: WebChatAdapter = deepSeekAdapter) {
 				GM_setValue(key, { ...req, status: 'processing', startedAt, deadlineAt });
 				await adapter.submit(req.prompt, cancelled, req.images, req.id);
 				if (cancelled()) throw new Error('请求已取消，已停止重试。');
+				// Preserve deadline adjustments made by the owner during an asynchronous upload.
+				deadlineAt = Math.max(deadlineAt, GM_getValue<WebRequest>(key).deadlineAt || 0);
 				// The page owns the sent message now. Do not retain base64 images in every progress update.
-				GM_setValue(key, { ...req, status: 'processing', startedAt, deadlineAt, prompt: undefined, images: undefined });
+				GM_setValue(key, {
+					...GM_getValue<WebRequest>(key),
+					status: 'processing',
+					startedAt,
+					deadlineAt,
+					prompt: undefined,
+					images: undefined
+				});
 				conversationUses++;
 				let previous = '',
 					stableAt = 0,
 					limitedAt = 0,
 					rateLimitRetries = 0;
-				while (!cancelled() && Date.now() < deadlineAt) {
+				while (!cancelled()) {
+					const current = GM_getValue<WebRequest>(key);
+					deadlineAt = Math.max(deadlineAt, current.deadlineAt || 0);
+					if (current.paused) {
+						await sleep(300);
+						continue;
+					}
+					if (Date.now() >= deadlineAt) break;
 					const answer = adapter.readCompleted(req.id);
 					const recovery = answer ? undefined : adapter.retryRateLimited?.(req.id, cancelled);
 					if (recovery) {
 						const now = Date.now();
 						// Reserve the bounded retry budget immediately. Extending by tiny timer deltas
 						// makes foreground callers time out if this receiver is background-throttled.
-						const extendedDeadline = startedAt + req.timeout + WEB_RATE_LIMIT_MAX_WAIT;
+						const extendedDeadline = startedAt + req.timeout + WEB_RATE_LIMIT_MAX_WAIT + (current.pausedTotal || 0);
 						if (deadlineAt !== extendedDeadline || rateLimitRetries !== recovery.attempts) {
 							deadlineAt = extendedDeadline;
 							rateLimitRetries = recovery.attempts;
@@ -256,7 +299,14 @@ export function startDeepSeekBridge(adapter: WebChatAdapter = deepSeekAdapter) {
 						say('限流提示已消失，正在等待当前回答完成…');
 					}
 					if (answer && answer === previous && Date.now() - stableAt >= 1200) {
-						GM_setValue(key, { ...req, status: 'done', startedAt, prompt: undefined, images: undefined, answer });
+						GM_setValue(key, {
+							...GM_getValue<WebRequest>(key),
+							status: 'done',
+							startedAt,
+							prompt: undefined,
+							images: undefined,
+							answer
+						});
 						activeKey = '';
 						lastAnswerId = req.id;
 						conversationPath = location.pathname;
@@ -378,14 +428,31 @@ export function startDeepSeekBridge(adapter: WebChatAdapter = deepSeekAdapter) {
 				stop(String(error));
 			}
 		};
-		heartbeat = setInterval(tick, 1000);
-		// Storage events wake a background receiver without waiting for a throttled interval.
-		const wakeListener =
-			typeof GM_addValueChangeListener === 'function'
-				? GM_addValueChangeListener(WEB_BRIDGE_WAKE, () => tick())
-				: undefined;
-		document.addEventListener('visibilitychange', tick);
-		window.addEventListener('pageshow', tick);
+		let wakeListener: number | undefined;
+		let servicing = false;
+		const startServices = () => {
+			if (servicing) return;
+			servicing = true;
+			heartbeat = setInterval(tick, 1000);
+			wakeListener =
+				typeof GM_addValueChangeListener === 'function'
+					? GM_addValueChangeListener(WEB_BRIDGE_WAKE, () => tick())
+					: undefined;
+			document.addEventListener('visibilitychange', tick);
+		};
+		const stopServices = () => {
+			servicing = false;
+			clearInterval(heartbeat);
+			document.removeEventListener('visibilitychange', tick);
+			if (wakeListener !== undefined && typeof GM_removeValueChangeListener === 'function')
+				GM_removeValueChangeListener(wakeListener);
+			wakeListener = undefined;
+		};
+		startServices();
+		window.addEventListener('pageshow', () => {
+			startServices();
+			tick();
+		});
 
 		document.addEventListener(
 			'input',
@@ -397,21 +464,13 @@ export function startDeepSeekBridge(adapter: WebChatAdapter = deepSeekAdapter) {
 			},
 			true
 		);
-		window.addEventListener(
-			'pagehide',
-			() => {
-				clearInterval(heartbeat);
-				document.removeEventListener('visibilitychange', tick);
-				window.removeEventListener('pageshow', tick);
-				if (wakeListener !== undefined && typeof GM_removeValueChangeListener === 'function')
-					GM_removeValueChangeListener(wakeListener);
-				if (activeKey) {
-					failPending('网页离开或刷新，已停止本次请求。');
-					stop('页面已离开。');
-				} else if (enabled && !resetting) stop('页面已离开。');
-			},
-			{ once: true }
-		);
+		window.addEventListener('pagehide', (event) => {
+			stopServices();
+			if (activeKey) {
+				failPending('网页离开或刷新，已停止本次请求。');
+				stop('页面已离开，请检查对话后重新启用。');
+			} else if (enabled && (!resetting || event.persisted)) stop('页面已离开，请重新启用此标签页。');
+		});
 	};
 	if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', mount, { once: true });
 	else mount();

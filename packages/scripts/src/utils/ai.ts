@@ -1,3 +1,4 @@
+import { waitForAI, type AIRequestControl } from './request-control';
 import { parseJSONLike, AI_JSON_ESCAPE_HINT } from './answer-json';
 import { getWebBridgeState, requestWebAnswer } from './web-ai';
 import {
@@ -128,9 +129,10 @@ export function canSendImageInput(opts: VisionOptions) {
 export async function queryAIAnswerer(
 	opts: AIAnswererOptions,
 	question: AIQuestionPayload,
-	control: { retryEmptyContent?: boolean } = {}
+	control: AIRequestControl = {}
 ): Promise<SearchInformation[]> {
-	if (opts.aiProvider === 'deepseek-web') return queryWebAnswerer(opts, question);
+	await waitForAI(control);
+	if (opts.aiProvider === 'deepseek-web') return queryWebAnswerer(opts, question, control);
 	opts = { ...opts, aiApiUrl: opts.aiApiUrl.trim(), aiApiKey: opts.aiApiKey.trim(), aiModel: opts.aiModel.trim() };
 	const title = question.title.trim();
 	try {
@@ -238,14 +240,14 @@ export async function queryAIAnswerer(
 			data = createAIRequestBody(provider, opts, question.type, userPrompt, []);
 		}
 
-		let response: any = await requestAI(requestUrl, provider, opts.aiApiKey, data, opts);
+		let response: any = await requestAI(requestUrl, provider, opts.aiApiKey, data, opts, control);
 		if (imageUrls.length) rememberVisionCapability(opts, 'supported', 'request');
 		let retryInfo: Record<string, any> | undefined;
 		if (control.retryEmptyContent !== false && shouldRetryForEmptyFinalContent(response)) {
 			const firstResponse = response;
 			const retryData = createFinalJsonRetryData(provider, data, opts);
 			try {
-				const retryResponse = await requestAI(requestUrl, provider, opts.aiApiKey, retryData, opts);
+				const retryResponse = await requestAI(requestUrl, provider, opts.aiApiKey, retryData, opts, control);
 				response = retryResponse;
 				data = retryData;
 				retryInfo = {
@@ -296,7 +298,7 @@ export async function queryAIAnswerer(
 				}
 			);
 			try {
-				const retryResponse = await requestAI(requestUrl, provider, opts.aiApiKey, retryData, opts);
+				const retryResponse = await requestAI(requestUrl, provider, opts.aiApiKey, retryData, opts, control);
 				tokenUsage = mergeTokenUsage(tokenUsage, resolveTokenUsage(retryResponse));
 				response = retryResponse;
 				data = retryData;
@@ -406,8 +408,10 @@ async function requestAI(
 	provider: AIProvider,
 	apiKey: string,
 	data: Record<string, any>,
-	opts?: AIAnswererOptions
+	opts?: AIAnswererOptions,
+	control: AIRequestControl = {}
 ) {
+	await waitForAI(control);
 	if (provider === 'anthropic') {
 		const modelLimit = await getAnthropicModelLimit(requestUrl, data.model, apiKey);
 		if (modelLimit !== undefined) data.max_tokens = modelLimit;
@@ -419,6 +423,7 @@ async function requestAI(
 			responseType: 'json',
 			headers: createAIHeaders(provider, apiKey),
 			timeout: Math.max(5000, Number(opts?.aiAnswerTimeout || 60) * 1000),
+			isCancelled: control.isCancelled,
 			data
 		});
 		if (response?.error) throw Object.assign(new Error(normalizeErrorMessage(response)), { response });
@@ -1020,10 +1025,15 @@ function normalizeLineAnswer(answer: string, groups?: AILineOptionGroup[]): stri
 		const picked = pickAnswerFromObject(json);
 		if (picked && picked !== text) return normalizeLineAnswer(picked, groups);
 	}
-	const pairs = Array.from(text.matchAll(/\(?[A-Za-z0-9_-]+\s*[-—–~:：>]\s*([A-Za-z0-9_-]+)\)?/g)).map(
-		(match) => match[1]
-	);
-	return valid(pairs) ? pairs.join('#') : '';
+	const ordered = new Array<string>(groups.length);
+	for (const token of tokens) {
+		const pair = token.match(/^\(?([A-Za-z]|\d+)\s*[-—–~:：>]\s*([A-Za-z0-9_-]+)\)?$/);
+		if (!pair) return '';
+		const index = /^\d+$/.test(pair[1]) ? Number(pair[1]) - 1 : pair[1].toUpperCase().charCodeAt(0) - 65;
+		if (index < 0 || index >= groups.length || ordered[index] !== undefined) return '';
+		ordered[index] = pair[2];
+	}
+	return ordered.every(Boolean) && valid(ordered) && tokens.length === groups.length ? ordered.join('#') : '';
 }
 
 function resolveTokenUsage(response: any) {
@@ -1446,7 +1456,11 @@ export async function probeVisionModel(opts: AIAnswererOptions): Promise<string>
 }
 
 /** Web mode uses only native page submission/retry controls and never accesses API credentials. */
-async function queryWebAnswerer(opts: AIAnswererOptions, question: AIQuestionPayload): Promise<SearchInformation[]> {
+async function queryWebAnswerer(
+	opts: AIAnswererOptions,
+	question: AIQuestionPayload,
+	control: AIRequestControl
+): Promise<SearchInformation[]> {
 	const name = 'DeepSeek 网页（实验）',
 		homepage = 'https://chat.deepseek.com/';
 
@@ -1500,7 +1514,7 @@ async function queryWebAnswerer(opts: AIAnswererOptions, question: AIQuestionPay
 		]
 			.filter(Boolean)
 			.join('\n');
-		const rawContent = await requestWebAnswer(prompt, opts.aiAnswerTimeout, images, opts.webActivityId);
+		const rawContent = await requestWebAnswer(prompt, opts.aiAnswerTimeout, images, opts.webActivityId, control);
 		const answer = normalizeAnswerByQuestionType(
 			resolveAIAnswer(rawContent),
 			question.type,

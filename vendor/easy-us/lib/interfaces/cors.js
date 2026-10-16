@@ -42,89 +42,98 @@ class CorsEventEmitter {
      * @param args 事件参数
      * @param callback 事件回调，可以接收返回值
      */
-    emit(name, args = [], callback) {
-        store_1.$store
-            .getTab(const_1.$const.TAB_UID)
-            .then((uid) => {
+    cleanupExpired(uid) {
+        for (const metaKey of store_1.$store.list().filter(key => /^_temp_\.event\.[0-9a-z]{32}\.meta$/.test(key))) {
+            const meta = store_1.$store.get(metaKey);
+            if (!meta || meta.owner !== uid || meta.expiresAt > Date.now()) continue;
+            const id = metaKey.split('.')[2];
+            for (const suffix of ['state', 'return', 'arguments', 'meta'])
+                store_1.$store.delete(this.tempKey('event', id, suffix));
+            if (meta.queue) {
+                const remaining = String(store_1.$store.get(meta.queue) || '').split(',').filter(item => item && item !== id);
+                if (remaining.length) store_1.$store.set(meta.queue, remaining.join(','));
+                else store_1.$store.delete(meta.queue);
+            }
+        }
+    }
+    emit(name, args = [], callback, onError) {
+        store_1.$store.getTab(const_1.$const.TAB_UID).then((uid) => {
+            this.cleanupExpired(uid);
             const id = common_1.$.uuid().replace(/-/g, '');
             const key = uid + '.' + this.eventKey(name);
-            /** 状态, 0 等待交互 ， 1 确定 , 2 取消 ， 后面紧跟着模态框中获取到的值，如果模态框类型是 prompt 则有值，否则为空字符串 */
+            const metaKey = this.tempKey('event', id, 'meta');
+            let listenerId, timeout;
+            let settled = false;
+            const finish = (error) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timeout);
+                if (listenerId !== undefined) store_1.$store.removeChangeListener(listenerId);
+                const value = store_1.$store.get(this.keyOfReturn(id));
+                // Only this request's keys and queue entry belong to this sender.
+                for (const suffix of ['state', 'return', 'arguments', 'meta'])
+                    store_1.$store.delete(this.tempKey('event', id, suffix));
+                const pending = String(store_1.$store.get(key) || '').split(',').filter(item => item && item !== id);
+                if (pending.length) store_1.$store.set(key, pending.join(','));
+                else store_1.$store.delete(key);
+                if (error) { if (onError) onError(error); else console.error(error); }
+                else if (callback) callback(value);
+            };
+            store_1.$store.set(metaKey, { owner: uid, queue: key, expiresAt: Date.now() + 30 * 60 * 1000 });
             store_1.$store.set(this.keyOfState(id), 0);
-            /** 模态框所需参数 */
             store_1.$store.set(this.keyOfArguments(id), args);
-            /**
-             * 由于部分脚本管理器API实现不同，脚本猫中 setValue 后立即监听变化会监听到上一个 set 0 的事件
-             * 所以这里等待一段时间后再进行监听，避免监听到上一个 set 0 的事件
-             */
-            setTimeout(() => {
-                const listenerId = store_1.$store.addChangeListener(this.keyOfState(id), () => {
-                    // 移除此监听器
-                    store_1.$store.removeChangeListener(listenerId);
-                    // 执行回调
-                    callback === null || callback === void 0 ? void 0 : callback(store_1.$store.get(this.keyOfReturn(id)));
-                    // 移除冗余的本地临时存储变量
-                    store_1.$store.delete(this.keyOfState(id));
-                    store_1.$store.delete(this.keyOfReturn(id));
-                    store_1.$store.delete(this.keyOfArguments(id));
-                }) || 0;
-                /** 添加 id 到监听队列 */
-                store_1.$store.set(key, (store_1.$store.get(key) ? String(store_1.$store.get(key)).split(',') : []).concat(id).join(','));
-            }, 100);
-        })
-            .catch(console.error);
+            timeout = setTimeout(() => finish(new Error('跨页面请求超时，请重试。')), 30 * 60 * 1000);
+            // Some managers deliver the initial state=0 after listener registration.
+            listenerId = store_1.$store.addChangeListener(this.keyOfState(id), (current) => {
+                if (current === 1) finish();
+                else if (current === 2) finish(new Error(String(store_1.$store.get(this.keyOfReturn(id)) || '跨页面请求失败')));
+            });
+            const pending = String(store_1.$store.get(key) || '').split(',').filter(Boolean);
+            store_1.$store.set(key, pending.concat(id).join(','));
+        }).catch(error => { if (onError) onError(error); else console.error(error); });
     }
-    /**
-     * 监听跨域事件
-     * @param name 事件名，全局唯一
-     * @param handler 处理器，可以通过处理器返回任意值作为另外一端的回调值
-     * @returns
-     */
+    /** Listen only to this tab's queue; completion, deletion and failure are distinct states. */
     on(name, handler) {
-        return new Promise((resolve) => {
-            store_1.$store
-                .getTab(const_1.$const.TAB_UID)
-                .then((uid) => {
-                const key = uid + '.' + this.eventKey(name);
-                const originId = this.eventMap.get(key);
-                if (originId) {
-                    resolve(originId);
-                }
-                else {
-                    const id = store_1.$store.addChangeListener(key, (curr, pre, remote) => __awaiter(this, void 0, void 0, function* () {
-                        if (remote) {
-                            // 删除当前 key 也会导致触发监听。
-                            if (curr === undefined) {
-                                return;
-                            }
-                            const list = String(curr).split(',');
-                            // 处理队列
-                            const id = list.pop();
-                            if (id) {
-                                // 设置返回参数
-                                store_1.$store.set(this.keyOfReturn(id), yield handler(store_1.$store.get(this.keyOfArguments(id))));
-                                // 更新队列
-                                setTimeout(() => {
-                                    // 这里改变参数，可以触发另一端的监听
-                                    store_1.$store.set(this.keyOfState(id), 1);
-                                    // 完成监听，删除id
-                                    store_1.$store.set(key, list.join(','));
-                                }, 100);
-                            }
+        return store_1.$store.getTab(const_1.$const.TAB_UID).then((uid) => {
+            this.cleanupExpired(uid);
+            const key = uid + '.' + this.eventKey(name);
+            if (this.eventMap.has(key)) return this.eventMap.get(key);
+            const processing = new Set();
+            const consume = async (current) => {
+                if (current === undefined) return;
+                const ids = store_1.$store.list().filter(metaKey => /^_temp_\.event\.[0-9a-z]{32}\.meta$/.test(metaKey))
+                    .filter(metaKey => store_1.$store.get(metaKey)?.queue === key).map(metaKey => metaKey.split('.')[2]);
+                for (const id of ids) {
+                    const meta = store_1.$store.get(this.tempKey('event', id, 'meta'));
+                    if (processing.has(id) || !meta || meta.owner !== uid || meta.expiresAt <= Date.now() ||
+                        store_1.$store.get(this.keyOfState(id)) !== 0) continue;
+                    processing.add(id);
+                    try {
+                        const value = await handler(store_1.$store.get(this.keyOfArguments(id)));
+                        if (store_1.$store.get(this.keyOfState(id)) === 0) {
+                            store_1.$store.set(this.keyOfReturn(id), value);
+                            store_1.$store.set(this.keyOfState(id), 1);
                         }
-                    })) || 0;
-                    this.eventMap.set(key, id);
-                    resolve(id);
+                    } catch (error) {
+                        if (store_1.$store.get(this.keyOfState(id)) === 0) {
+                            store_1.$store.set(this.keyOfReturn(id), error instanceof Error ? error.message : String(error));
+                            store_1.$store.set(this.keyOfState(id), 2);
+                        }
+                    } finally { processing.delete(id); }
                 }
-            })
-                .catch(console.error);
+            };
+            const listenerId = store_1.$store.addChangeListener(key, current => { void consume(current); });
+            this.eventMap.set(key, listenerId);
+            void consume(store_1.$store.get(key));
+            return listenerId;
         });
     }
     off(name) {
-        const key = this.eventKey(name);
-        const originId = this.eventMap.get(key);
-        if (originId) {
-            this.eventMap.delete(key);
-            store_1.$store.removeChangeListener(originId);
+        for (const [key, id] of this.eventMap) {
+            if (key.endsWith('.' + this.eventKey(name))) {
+                this.eventMap.delete(key);
+                store_1.$store.removeChangeListener(id);
+            }
         }
     }
     defineTopFunction(func) {
@@ -145,7 +154,7 @@ class CorsEventEmitter {
                 try {
                     exports.cors.emit(event_name, args, (val) => {
                         resolve(val);
-                    });
+                    }, reject);
                 }
                 catch (e) {
                     reject(e);
@@ -156,23 +165,6 @@ class CorsEventEmitter {
     }
 }
 exports.CorsEventEmitter = CorsEventEmitter;
-if (typeof GM_listValues !== 'undefined' && self === top) {
-    // 加载页面后
-    window.onload = () => {
-        // 删除全部未处理的模态框临时变量，以及监听队列
-        store_1.$store.list().forEach((key) => {
-            if (/_temp_.event.[0-9a-z]{32}.(state|return|arguments)/.test(key)) {
-                store_1.$store.delete(key);
-            }
-            if (/_top_function_.*/.test(key)) {
-                store_1.$store.delete(key);
-            }
-            if (/[0-9a-z]{32}.cors.events/.test(key)) {
-                store_1.$store.delete(key);
-            }
-        });
-    };
-}
 /**
  * 全局跨域对象
  */

@@ -3,6 +3,7 @@ export async function runQuestionPages(options: {
 	closed(): boolean;
 	identity(): string;
 	answer(): Promise<void>;
+	beforeNavigate?(): Promise<void>;
 	next(): HTMLElement | null;
 	wait(ms: number): Promise<unknown>;
 	transitionTimeout?: number;
@@ -16,6 +17,8 @@ export async function runQuestionPages(options: {
 		if (options.closed()) return;
 		const next = options.next();
 		if (!next || next.matches(':disabled,[disabled],[aria-disabled="true"],.disabled') || next.hidden) return;
+		await options.beforeNavigate?.();
+		if (options.closed()) return;
 		next.click();
 		const deadline = Date.now() + (options.transitionTimeout ?? 15000);
 		let changed = false;

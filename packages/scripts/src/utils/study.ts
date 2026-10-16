@@ -1,5 +1,3 @@
-import { $ } from '@xuexitong-ai-helper/core';
-
 /**
  * 等待视频加载并获取视频
  */
@@ -18,26 +16,41 @@ export async function waitForMedia(options?: {
 	root?: HTMLElement | Document;
 	timeout?: number;
 	filter?: (video: HTMLVideoElement | HTMLAudioElement) => boolean;
+	signal?: AbortSignal;
 }) {
-	const res = await Promise.race([
-		new Promise<HTMLVideoElement | HTMLAudioElement>((resolve, reject) => {
-			const interval = setInterval(() => {
-				const video = (options?.root || document).querySelector<HTMLVideoElement | HTMLAudioElement>(
+	return new Promise<HTMLVideoElement | HTMLAudioElement>((resolve, reject) => {
+		let interval: ReturnType<typeof setInterval> | undefined;
+		let timeout: ReturnType<typeof setTimeout> | undefined;
+		let settled = false;
+		const finish = (error?: unknown, media?: HTMLVideoElement | HTMLAudioElement) => {
+			if (settled) return;
+			settled = true;
+			clearInterval(interval);
+			clearTimeout(timeout);
+			options?.signal?.removeEventListener('abort', abort);
+			if (error) reject(error);
+			else resolve(media!);
+		};
+		const abort = () => finish(new Error('等待视频/音频已取消。'));
+		const check = () => {
+			try {
+				const media = (options?.root || document).querySelector<HTMLVideoElement | HTMLAudioElement>(
 					`${options?.videoSelector || 'video'},${options?.audioSelector || 'audio'}`
 				);
-				if (video && (!options?.filter || options.filter(video))) {
-					clearInterval(interval);
-					resolve(video);
-				}
-			}, 200);
-		}),
-		$.sleep(options?.timeout ?? 3 * 60 * 1000)
-	]);
-	if (res) {
-		return res;
-	} else {
-		throw new Error('视频/音频未找到，或者加载超时。');
-	}
+				if (media && (!options?.filter || options.filter(media))) finish(undefined, media);
+			} catch (error) {
+				finish(error);
+			}
+		};
+		if (options?.signal?.aborted) {
+			abort();
+			return;
+		}
+		options?.signal?.addEventListener('abort', abort, { once: true });
+		interval = setInterval(check, 200);
+		timeout = setTimeout(() => finish(new Error('视频/音频未找到，或者加载超时。')), options?.timeout ?? 3 * 60 * 1000);
+		check();
+	});
 }
 
 export function waitForElement(

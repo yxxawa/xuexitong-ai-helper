@@ -157,3 +157,41 @@ test('50 successful requests still rotate the conversation exactly once',async t
   assert.equal(e.calls.length,50);assert.equal(e.resets,1);
   assert.equal(e.bridge.getWebBridgeState().status,'reloading');
 });
+
+test('pausing the question owner stops native retry attempts and preserves the remaining request budget until resume',async t=>{
+  const e=await setup(t,{rateLimit:true,delay:45000});let paused=false,retries=0;
+  const retry=e.adapter.retryRateLimited;e.adapter.retryRateLimited=(...args)=>{retries++;return retry(...args);};
+  const task=capture(e.bridge.requestWebAnswer('pause long retry',30,[],undefined,{isPaused:()=>paused}));
+  await e.clock.advance(3000);paused=true;await e.clock.advance(700);
+  const before=retries;await e.clock.advance(1900000);
+  assert.equal(retries,before);assert.equal(task.done,false);assert.equal(e.calls.length,1);
+  paused=false;await e.clock.advance(2500);
+  assert.equal(task.done,true);assert.equal(task.error,undefined);assert.equal(e.calls.length,1);
+});
+test('owner cancellation during upload removes the mailbox and stops all retries without re-sending',async t=>{
+  const e=await setup(t,{onSubmit:async({clock})=>{await new Promise(resolve=>clock.setTimeout(resolve,1500));}});
+  let cancelled=false;const task=capture(e.bridge.requestWebAnswer('cancel upload',30,[],undefined,{isCancelled:()=>cancelled}));
+  await e.clock.advance(500);cancelled=true;await e.clock.advance(2500);
+  assert.equal(task.done,true);assert.match(task.error.message,/取消/);assert.equal(e.calls.length,1);
+  assert.equal([...e.mem.values.keys()].filter(key=>key.startsWith(PREFIX)).length,0);
+  await e.clock.advance(1000);assert.equal(e.calls.length,1);
+});
+test('repeated cached page restores reinstall bridge heartbeat and storage wakeups exactly once',async t=>{
+  const e=await setup(t);
+  for(let i=0;i<2;i++) {
+    for(const name of ['pagehide','pageshow']) {const event=new e.window.Event(name);Object.defineProperty(event,'persisted',{value:true});e.window.dispatchEvent(event);}
+    assert.equal(e.bridge.getWebBridgeState(),undefined);
+    e.toggle.click();await e.clock.advance(150);const updated=e.bridge.getWebBridgeState().updatedAt;
+    await e.clock.advance(181000);assert.ok(e.bridge.getWebBridgeState().updatedAt>updated);
+    const task=capture(e.bridge.requestWebAnswer('restored '+i,30));await e.clock.advance(2000);
+    assert.equal(task.done,true);assert.equal(task.error,undefined);
+  }
+  assert.equal(e.calls.length,2);
+});
+
+test('a task requiring pause support asks to refresh an older receiver before sending anything',async t=>{
+  const e=await setup(t);const state=e.mem.globals.GM_getValue(STATE);
+  delete state.supportsPause;e.mem.globals.GM_setValue(STATE,state);
+  await assert.rejects(e.bridge.requestWebAnswer('old receiver',30,[],undefined,{isPaused:()=>false}),/刷新/);
+  assert.equal(e.calls.length,0);assert.equal([...e.mem.values.keys()].filter(key=>key.startsWith(PREFIX)).length,0);
+});

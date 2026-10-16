@@ -1,10 +1,11 @@
+import { fillStandardAnswer } from '../utils/answer-writer';
 import { registerAnswerReview } from '../utils/answer-review';
 import { questionCacheKey } from '../utils/answer-cache';
 import { readPageAnswer } from '../utils/answer-input';
 import type { AIAnswererOptions, AIQuestionPayload } from '../utils/ai';
 import type { WorkContext, CustomWork } from '@xuexitong-ai-helper/core/src/core/worker/interface';
 import { acquireWebActivity } from '../utils/web-activity';
-import { fillTextAnswer, isOptionChecked, clearOtherMultipleOptions, fillGroupedChoices } from '../utils/answer-input';
+import { fillTextAnswer, fillGroupedChoices } from '../utils/answer-input';
 import { runQuestionPages } from '../utils/pagination';
 import {
 	inspectQuestionImages,
@@ -14,11 +15,7 @@ import {
 } from '../utils/question';
 /** global Ext videojs getTeacherAjax jobs */
 
-import {
-	CourseWorker,
-	createDefaultQuestionResolver,
-	type DefaultWork
-} from '@xuexitong-ai-helper/core/src/core/worker';
+import { CourseWorker } from '@xuexitong-ai-helper/core/src/core/worker';
 import { $ } from '@xuexitong-ai-helper/core/src/utils/common';
 import { StringUtils } from '@xuexitong-ai-helper/core/src/utils/string';
 import { request } from '@xuexitong-ai-helper/core/src/core/utils/request';
@@ -29,13 +26,7 @@ import { $modal, h, $store, MessageElement, Project, Script, $el, $gm, $$el, $ui
 
 import { CommonProject } from './common';
 import { workNotes, volume, playbackRate, dropdownStyle } from '../utils/configs';
-import {
-	aiConfigEmptyWarning,
-	commonWork,
-	optimizationElementWithImage,
-	removeRedundantWords,
-	simplifyWorkResult
-} from '../utils/work';
+import { aiConfigEmptyWarning, commonWork, removeRedundantWords, simplifyWorkResult } from '../utils/work';
 import md5 from 'md5';
 // @ts-ignore
 import Typr from 'typr.js';
@@ -795,7 +786,12 @@ function searchCXQuestion(
 			}
 		];
 	const { title, ...details } = question;
-	return CommonProject.scripts.apps.methods.searchAnswerInCaches(title, { ...details, providerConfig, webActivityId });
+	return CommonProject.scripts.apps.methods.searchAnswerInCaches(title, {
+		...details,
+		providerConfig,
+		webActivityId,
+		control: { isCancelled: ctx.isCancelled, isPaused: ctx.isPaused, waitUntilReady: ctx.waitUntilReady }
+	});
 }
 /** Register against the actual live root, including chapter roots owned by a nested frame. */
 function prepareCXQuestion(
@@ -826,12 +822,14 @@ function prepareCXQuestion(
 		},
 		snapshot,
 		options: () => ({ ...CommonProject.scripts.settings.cfg }),
-		async apply(infos) {
+		async apply(infos, control) {
 			if (typeof worker.opts.work !== 'function') throw new Error('此题暂不支持自动替换答案。');
 			const result = await (worker.opts.work as CustomWork<any>)({
 				...ctx,
 				searchInfos: infos,
-				isCancelled: () => !ctx.root.isConnected
+				isCancelled: () => !ctx.root.isConnected || Boolean(control?.isCancelled?.()),
+				waitUntilReady: undefined,
+				isPaused: undefined
 			});
 			return result.finish;
 		},
@@ -927,35 +925,19 @@ function workOrExam(
 			const type = resolveQuestionType(elements, ctx, elements.title.map((el) => el?.textContent || '').join(' '));
 
 			if (type && (type === 'completion' || type === 'multiple' || type === 'judgement' || type === 'single')) {
-				if (type === 'multiple') clearOtherMultipleOptions(elements.options, searchInfos[0]?.results[0]?.answer || '');
-				const resolver = createDefaultQuestionResolver(ctx)[type];
-				return await resolver(
-					searchInfos,
-					elements.options.map((option) => optimizationElementWithImage(option)),
-					async (type, answer, option) => {
-						if (ctx.isCancelled?.()) throw new Error('答题已取消');
-						// 如果存在已经选择的选项
-						if (type === 'judgement' || type === 'single' || type === 'multiple') {
-							if (!isOptionChecked(option)) {
-								option.click();
-								await $.sleep(500);
-							}
-						} else if (type === 'completion' && answer.trim()) {
-							fillTextAnswer(option, answer);
-							if (option?.parentElement?.parentElement) {
-								/** 如果存在保存按钮则点击 */
-								$el('[onclick*=saveQuestion]', option?.parentElement?.parentElement)?.click();
-								await $.sleep(500);
-							}
-						}
-					}
-				);
+				return fillStandardAnswer(ctx, type, () => $.sleep(500));
 			}
 			// 连线题自定义处理
 			else if (type && type === 'line') {
 				for (const info of searchInfos) {
 					for (const result of info.results) {
-						const filled = await fillLineAnswer(result.answer, ctx.root, () => $.sleep(200), ctx.isCancelled);
+						const filled = await fillLineAnswer(
+							result.answer,
+							ctx.root,
+							() => $.sleep(200),
+							ctx.isCancelled,
+							ctx.waitUntilReady
+						);
 						if (filled.finish) return filled;
 					}
 				}
@@ -963,11 +945,11 @@ function workOrExam(
 			}
 			// 完形填空
 			else if (type && type === 'fill') {
-				return readerAndFillHandle(searchInfos, elements.filling, ctx.isCancelled);
+				return readerAndFillHandle(searchInfos, elements.filling, ctx.isCancelled, ctx.waitUntilReady);
 			}
 			// 阅读理解
 			else if (type && type === 'reader') {
-				return readerAndFillHandle(searchInfos, elements.reading, ctx.isCancelled);
+				return readerAndFillHandle(searchInfos, elements.reading, ctx.isCancelled, ctx.waitUntilReady);
 			}
 
 			return { finish: false };
@@ -1005,6 +987,7 @@ function workOrExam(
 			} else {
 				await runQuestionPages({
 					closed: () => worker.isClose,
+					beforeNavigate: () => worker.waitUntilReady(),
 					identity: () =>
 						Array.from(document.querySelectorAll<HTMLElement>('.questionLi'))
 							.map((root) =>
@@ -1834,85 +1817,86 @@ const JobRunner = {
 		// 固定视频进度
 		fixedVideoProgress();
 
-		// 随机作答视频内题目
-		if (setting.videoQuizStrategy === 'random') {
-			const loop = async () => {
-				const submitBtn = () => doc.querySelector<HTMLElement>('#videoquiz-submit');
-				if (submitBtn()) {
-					const list = Array.from(doc.querySelectorAll<HTMLElement>('.ans-videoquiz-opt label'));
-					const answer = list[Math.floor(Math.random() * list.length)];
-					answer?.click();
-					submitBtn()?.click();
-					await $.sleep(3000);
-					// 隐藏视频内题目元素
-					const container = doc.querySelector<HTMLElement>('#video .ans-videoquiz');
-					const components = Array.from(doc.querySelectorAll<HTMLElement>('.x-component-default'));
-					if (container) {
-						container.remove();
-					}
-					if (components.length) {
-						for (const com of components) {
-							com.style.display = 'none';
-						}
-					}
-				}
-				await $.sleep(3000);
-				await loop();
-			};
-			loop();
-		}
-
-		/**
-		 * 视频播放
-		 */
 		return new Promise<void>((resolve, reject) => {
-			// 检测视频
-			const reloadInterval = setInterval(() => {
-				const errorDiv = doc.querySelector<HTMLElement>('.vjs-modal-dialog-content');
-				if (
-					['视频文件损坏', '网络错误导致视频下载中途失败', '视频因格式不支持', '网络的问题无法加载'].some((s) =>
-						errorDiv?.innerText.includes(s)
-					)
-				) {
-					console.error('检测到视频加载失败，即将跳过视频。');
-					$message.error('检测到视频加载失败，即将跳过视频。');
-					setTimeout(resolve, 3000);
-				}
-			}, 3000);
-
+			let finished = false;
+			let quizBusy = false;
+			let playTimer: ReturnType<typeof setTimeout> | undefined;
+			let quizTimer: ReturnType<typeof setInterval> | undefined;
+			let hideTimer: ReturnType<typeof setTimeout> | undefined;
+			const finish = (error?: unknown) => {
+				if (finished) return;
+				finished = true;
+				clearInterval(reloadInterval);
+				clearInterval(quizTimer);
+				clearTimeout(playTimer);
+				clearTimeout(hideTimer);
+				media.removeEventListener('pause', resume);
+				media.removeEventListener('ended', ended);
+				doc.defaultView?.removeEventListener('pagehide', leave);
+				if (error) reject(error);
+				else resolve();
+			};
+			const leave = () => finish();
+			const ended = () => {
+				console.log('视频播放完毕');
+				finish();
+			};
 			const playFunction = async () => {
-				// 这里先判断，再检测，否则后续添加多个 await 会导致视频启动等待时间过长，导致用户误认为脚本失效
+				if (finished) return;
 				if (hasFaceRecognition()) await waitForFaceRecognition();
 				if (hasNewFaceRecognition()) await waitForNewFaceRecognition();
-				if (media.ended === false) {
+				if (!finished && !media.ended) {
 					await $.sleep(1000);
-					media.play();
+					if (finished) return;
+					await media.play();
 					media.playbackRate = playbackRate;
 				}
 			};
-
-			media.addEventListener('pause', playFunction);
-
-			media.addEventListener('ended', () => {
-				media.removeEventListener('pause', playFunction);
-				console.log('视频播放完毕');
-				clearInterval(reloadInterval);
-				resolve();
-			});
-
+			const resume = () => {
+				void playFunction().catch(finish);
+			};
+			const reloadInterval = setInterval(() => {
+				const errorDiv = doc.querySelector<HTMLElement>('.vjs-modal-dialog-content');
+				if (
+					['视频文件损坏', '网络错误导致视频下载中途失败', '视频因格式不支持', '网络的问题无法加载'].some((text) =>
+						errorDiv?.innerText.includes(text)
+					)
+				) {
+					$message.error('检测到视频加载失败，即将跳过视频。');
+					finish();
+				}
+			}, 3000);
+			if (setting.videoQuizStrategy === 'random') {
+				quizTimer = setInterval(() => {
+					const submit = doc.querySelector<HTMLElement>('#videoquiz-submit');
+					if (finished || quizBusy || !submit) return;
+					quizBusy = true;
+					const list = Array.from(doc.querySelectorAll<HTMLElement>('.ans-videoquiz-opt label'));
+					list[Math.floor(Math.random() * list.length)]?.click();
+					submit.click();
+					hideTimer = setTimeout(() => {
+						if (finished) return;
+						doc.querySelector('#video .ans-videoquiz')?.remove();
+						doc.querySelectorAll<HTMLElement>('.x-component-default').forEach((component) => {
+							component.style.display = 'none';
+						});
+						quizBusy = false;
+					}, 3000);
+				}, 3000);
+			}
+			media.addEventListener('pause', resume);
+			media.addEventListener('ended', ended);
+			doc.defaultView?.addEventListener('pagehide', leave);
 			console.log('视频开始播放');
 			media.volume = volume;
-
-			// 重置视频进度
 			media.currentTime = 0;
-
-			// 使用 setTimeout 解决 The play() request was interrupted by a call to pause() 问题
-			setTimeout(() => {
-				playMedia(() => media.play())
-					.then(() => {
-						media.playbackRate = playbackRate;
+			playTimer = setTimeout(() => {
+				void playMedia(() => media.play())
+					.then((playing) => {
+						if (!playing) finish(new Error('视频无法播放，已停止检测。'));
+						else if (!finished) media.playbackRate = playbackRate;
 					})
-					.catch(reject);
+					.catch(finish);
 			}, 200);
 		});
 	},
@@ -2025,40 +2009,19 @@ const JobRunner = {
 					const type = resolveQuestionType(elements, ctx, elements.title.map((el) => el?.textContent || '').join(' '));
 
 					if (type && (type === 'completion' || type === 'multiple' || type === 'judgement' || type === 'single')) {
-						if (type === 'multiple')
-							clearOtherMultipleOptions(elements.options, searchInfos[0]?.results[0]?.answer || '');
-						const resolver = createDefaultQuestionResolver(ctx)[type];
-
-						const handler: DefaultWork<any>['handler'] = (type, answer, option, ctx) => {
-							if (ctx.isCancelled?.()) throw new Error('答题已取消');
-							if (type === 'judgement' || type === 'single' || type === 'multiple') {
-								// 检查是否已经选择
-								const checked = isOptionChecked(option);
-								if (checked) {
-									// 跳过
-								} else {
-									option?.click();
-								}
-							} else if (type === 'completion' && answer.trim()) {
-								fillTextAnswer(option, answer);
-								if (option?.parentElement?.parentElement) {
-									/** 如果存在保存按钮则点击 */
-									$el('[onclick*=saveQuestion]', option.parentElement.parentElement)?.click();
-								}
-							}
-						};
-
-						return await resolver(
-							searchInfos,
-							elements.options.map((option) => optimizationElementWithImage(option)),
-							handler
-						);
+						return fillStandardAnswer(ctx, type, () => $.sleep(500));
 					}
 					// 连线题自定义处理
 					else if (type && type === 'line') {
 						for (const info of searchInfos) {
 							for (const result of info.results) {
-								const filled = await fillLineAnswer(result.answer, ctx.root, () => $.sleep(200), ctx.isCancelled);
+								const filled = await fillLineAnswer(
+									result.answer,
+									ctx.root,
+									() => $.sleep(200),
+									ctx.isCancelled,
+									ctx.waitUntilReady
+								);
 								if (filled.finish) return filled;
 							}
 						}
@@ -2075,6 +2038,7 @@ const JobRunner = {
 					);
 					CommonProject.scripts.workResults.methods.updateWorkStateByResults(res);
 
+					if (curr.ctx?.isCancelled?.()) return;
 					// 没有完成时随机作答
 					if (curr.result?.finish === false && curr.resolved === true) {
 						if (isQuestionSkipped(curr.ctx?.searchInfos)) {
@@ -2095,6 +2059,8 @@ const JobRunner = {
 						) {
 							console.log('正在随机作答');
 
+							await curr.ctx?.waitUntilReady?.();
+							if (curr.ctx?.isCancelled?.()) return;
 							const option = options[Math.floor(Math.random() * options.length)];
 							// @ts-ignore 随机选择选项
 							option?.parentElement?.querySelector('a,label')?.click();
@@ -2103,22 +2069,12 @@ const JobRunner = {
 
 							// 随机填写答案
 							for (const option of options) {
-								const textarea = option?.parentElement?.querySelector('textarea');
+								await curr.ctx?.waitUntilReady?.();
+								if (curr.ctx?.isCancelled?.()) return;
 								const completeTexts = commonSetting['randomWork-completeTexts-textarea'].split('\n').filter(Boolean);
 								const text = completeTexts[Math.floor(Math.random() * completeTexts.length)];
-								const textareaFrame = option?.parentElement?.querySelector('iframe');
-
-								if (text) {
-									if (textarea) {
-										textarea.value = text;
-									}
-									if (textareaFrame?.contentDocument) {
-										textareaFrame.contentDocument.body.innerHTML = text;
-									}
-								} else {
-									console.error('请设置随机填空的文案');
-								}
-
+								if (text) fillTextAnswer(option, text);
+								else console.error('请设置随机填空的文案');
 								await $.sleep(500);
 							}
 						}
@@ -2168,7 +2124,8 @@ const JobRunner = {
 			$message.info({ content: msg, duration: stopSecondWhenFinish });
 			await $.sleep(stopSecondWhenFinish * 1000);
 
-			// 处理提交
+			// Re-check after the countdown: stop/pause also controls saving and submission.
+			await worker.waitUntilReady();
 			await worker.uploadHandler({
 				type: upload,
 				results,
@@ -2179,12 +2136,14 @@ const JobRunner = {
 
 					await $.sleep(3000);
 
+					await worker.waitUntilReady();
 					if (uploadable) {
 						// @ts-ignore 提交
 						frameWindow.btnBlueSubmit();
 
 						await $.sleep(3000);
 						/** 确定按钮 */
+						await worker.waitUntilReady();
 						// @ts-ignore 确定
 						frameWindow.submitCheckTimes();
 						// @ts-ignore 2024/4 更新后上方函数无法关闭弹窗，需要手动关闭确定弹窗
@@ -2247,7 +2206,12 @@ function isQuestionSkipped(infos: SearchInformation[] | undefined) {
 }
 
 /** 阅读理解和完形填空的共同处理器 */
-async function readerAndFillHandle(searchInfos: SearchInformation[], list: HTMLElement[], cancelled?: () => boolean) {
+async function readerAndFillHandle(
+	searchInfos: SearchInformation[],
+	list: HTMLElement[],
+	cancelled?: () => boolean,
+	beforeWrite?: () => Promise<void>
+) {
 	for (const info of searchInfos)
 		for (const result of info.results) {
 			const filled = await fillGroupedChoices(
@@ -2255,7 +2219,8 @@ async function readerAndFillHandle(searchInfos: SearchInformation[], list: HTMLE
 				list,
 				'span.saveSingleSelect[data]',
 				() => $.sleep(200),
-				cancelled
+				cancelled,
+				beforeWrite
 			);
 			if (filled.finish) return filled;
 		}

@@ -16,6 +16,7 @@ export async function request<T extends 'json' | 'text'>(
 		headers?: Record<string, string>;
 		data?: Record<string, any>;
 		timeout?: number;
+		isCancelled?: () => boolean;
 	}
 ): Promise<T extends 'json' ? any : string> {
 	const { responseType = 'json', method = 'get', type = 'fetch', data = {}, headers = {}, timeout = 60000 } = opts;
@@ -26,13 +27,15 @@ export async function request<T extends 'json' | 'text'>(
 			: Object.keys(data).length
 			? JSON.stringify(data)
 			: undefined;
+	if (opts.isCancelled?.()) throw new Error('请求已取消。');
 	if (type === 'GM_xmlhttpRequest' && $.isInBrowser()) {
-		return new Promise((resolve, reject) => {
+		let cancelTimer: ReturnType<typeof setInterval> | undefined;
+		return new Promise<any>((resolve, reject) => {
 			if (typeof GM_xmlhttpRequest === 'undefined') {
 				reject(new Error('GM_xmlhttpRequest is not defined'));
 				return;
 			}
-			GM_xmlhttpRequest({
+			const handle = GM_xmlhttpRequest({
 				url,
 				method: method.toUpperCase() as 'GET' | 'HEAD' | 'POST',
 				data: method === 'post' ? body : undefined,
@@ -60,10 +63,22 @@ export async function request<T extends 'json' | 'text'>(
 				ontimeout: () => reject(new Error('请求超时，请重试或调整 AI 超时时间。')),
 				onabort: () => reject(new Error('请求已取消。'))
 			});
-		});
+			if (opts.isCancelled)
+				cancelTimer = setInterval(() => {
+					if (opts.isCancelled?.()) {
+						reject(new Error('请求已取消。'));
+						handle?.abort?.();
+					}
+				}, 100);
+		}).finally(() => clearInterval(cancelTimer));
 	}
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), timeout);
+	const cancelTimer = opts.isCancelled
+		? setInterval(() => {
+				if (opts.isCancelled?.()) controller.abort();
+		  }, 100)
+		: undefined;
 	try {
 		const fetcher: typeof fetch = $.isInBrowser() ? fetch : require('node-fetch');
 		const response = await fetcher(url, {
@@ -77,5 +92,6 @@ export async function request<T extends 'json' | 'text'>(
 		return responseType === 'json' ? JSON.parse(text || 'null') : text;
 	} finally {
 		clearTimeout(timer);
+		clearInterval(cancelTimer);
 	}
 }

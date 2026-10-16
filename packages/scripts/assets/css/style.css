@@ -1721,8 +1721,74 @@ modal-element {
 	.cx-ai-home .home-actions {
 		grid-template-columns: 1fr;
 	}
-	config-element {
-		flex-wrap: wrap;
+	.configs, .configs .configs-body {
+		display: block;
+		width: 100%;
+		min-width: 0;
+	}
+	.configs .configs-body config-element {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		padding: 6px 0;
+		min-width: 0;
+		box-sizing: border-box;
+	}
+	.configs .configs-body config-element label {
+		display: block;
+		white-space: normal;
+		overflow-wrap: anywhere;
+		padding: 0;
+		margin: 0;
+	}
+	.configs .configs-body config-element .config-wrapper {
+		display: block;
+		width: 100%;
+		min-width: 0;
+		padding: 0;
+	}
+	.configs .configs-body config-element .config-wrapper :is(input:not([type='checkbox'],[type='radio']),select,textarea) {
+		width: 100%;
+		max-width: 100%;
+		box-sizing: border-box;
+	}
+
+}
+/* Keep settings usable when a narrow window is retained after rotating/resizing the screen. */
+container-element .xth-shell-content {
+	container-type: inline-size;
+}
+@container (max-width: 440px) {
+	.configs, .configs .configs-body {
+		display: block;
+		width: 100%;
+		min-width: 0;
+	}
+	.configs .configs-body config-element {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		padding: 6px 0;
+		min-width: 0;
+		box-sizing: border-box;
+	}
+	.configs .configs-body config-element label {
+		display: block;
+		white-space: normal;
+		overflow-wrap: anywhere;
+		padding: 0;
+		margin: 0;
+	}
+	.configs .configs-body config-element .config-wrapper {
+		display: block;
+		width: 100%;
+		min-width: 0;
+		padding: 0;
+	}
+	.configs .configs-body config-element .config-wrapper :is(input:not([type='checkbox'],[type='radio']),select,textarea) {
+		width: 100%;
+		max-width: 100%;
+		box-sizing: border-box;
 	}
 }
 @media (prefers-reduced-motion: reduce) {

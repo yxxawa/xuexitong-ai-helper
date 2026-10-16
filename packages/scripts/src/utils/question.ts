@@ -19,33 +19,62 @@ export function getQuestionImageURL(img: HTMLImageElement): string {
 	return '';
 }
 
-function imagesIn(root: HTMLElement): Element[] {
-	const selector = 'img, svg, canvas, [style*="background-image"]';
-	return [...(root.matches(selector) ? [root] : []), ...Array.from(root.querySelectorAll(selector))].filter(
-		(node) => !node.parentElement?.closest('svg')
-	);
+interface QuestionVisual {
+	element: Element;
+	sources: string[];
+	background: boolean;
 }
-function visualURL(element: Element): string {
+function imageURL(value: string, element: Element) {
 	try {
-		if (element.tagName.toUpperCase() === 'IMG') return getQuestionImageURL(element as HTMLImageElement);
-		if (element.tagName.toUpperCase() === 'CANVAS') return (element as HTMLCanvasElement).toDataURL('image/png');
-		if (element.tagName.toLowerCase() === 'svg')
-			return (
-				'data:image/svg+xml;charset=utf-8,' +
-				encodeURIComponent(new element.ownerDocument.defaultView!.XMLSerializer().serializeToString(element))
-			);
-		const url = (element as HTMLElement).style.backgroundImage.match(/url\(["']?(.*?)["']?\)/)?.[1];
-		return url ? new URL(url, element.ownerDocument.baseURI).href : '';
+		const url = new URL(value.trim(), element.ownerDocument.baseURI);
+		return /^(?:https?:|blob:)$/.test(url.protocol) || url.href.startsWith('data:image/') ? url.href : '';
 	} catch {
 		return '';
 	}
 }
+/** Inspect the connected source nodes: stylesheet backgrounds disappear on detached clones. */
+function questionVisuals(root: HTMLElement): QuestionVisual[] {
+	const visuals: QuestionVisual[] = [];
+	for (const element of [root, ...Array.from(root.querySelectorAll('*'))]) {
+		if (element.parentElement?.closest('svg') || element.closest('script,style,[data-xth-image-ref]')) continue;
+		const tag = element.tagName.toUpperCase();
+		try {
+			if (tag === 'IMG')
+				visuals.push({ element, sources: [getQuestionImageURL(element as HTMLImageElement)], background: false });
+			else if (tag === 'CANVAS')
+				visuals.push({ element, sources: [(element as HTMLCanvasElement).toDataURL('image/png')], background: false });
+			else if (tag === 'SVG')
+				visuals.push({
+					element,
+					sources: [
+						'data:image/svg+xml;charset=utf-8,' +
+							encodeURIComponent(new element.ownerDocument.defaultView!.XMLSerializer().serializeToString(element))
+					],
+					background: false
+				});
+			else {
+				const style = element.ownerDocument.defaultView?.getComputedStyle(element);
+				const background = style?.backgroundImage || (element as HTMLElement).style?.background || '';
+				const sources = Array.from(background.matchAll(/url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))\s*\)/g), (match) =>
+					imageURL(match[1] ?? match[2] ?? match[3], element)
+				);
+				if (sources.length) visuals.push({ element, sources, background: true });
+			}
+		} catch {
+			if (tag === 'CANVAS' || tag === 'SVG' || tag === 'IMG')
+				visuals.push({ element, sources: [''], background: false });
+		}
+	}
+	return visuals;
+}
 export function inspectQuestionImages(...groups: (HTMLElement | undefined)[][]) {
-	const nodes = [...new Set(groups.flat().flatMap((root) => (root ? imagesIn(root) : [])))];
-	const sources = nodes.map(visualURL);
+	const visuals = new Map<Element, QuestionVisual>();
+	for (const root of groups.flat())
+		if (root) for (const visual of questionVisuals(root)) visuals.set(visual.element, visual);
+	const sources = [...visuals.values()].flatMap((visual) => visual.sources);
 	return {
 		imageUrls: Array.from(new Set(sources.filter(Boolean))),
-		hasImage: nodes.length > 0,
+		hasImage: visuals.size > 0,
 		unresolvedImageCount: sources.filter((source) => !source).length
 	};
 }
@@ -53,20 +82,30 @@ export function collectQuestionImageUrls(...groups: (HTMLElement | undefined)[][
 	return inspectQuestionImages(...groups).imageUrls;
 }
 export function questionElementText(root: HTMLElement, imageUrls: string[]): string {
-	const sources = imagesIn(root).map(visualURL);
+	const originals = [root, ...Array.from(root.querySelectorAll('*'))];
 	const clone = root.cloneNode(true) as HTMLElement;
+	const copies = [clone, ...Array.from(clone.querySelectorAll('*'))];
+	const visuals = questionVisuals(root);
 	clone.querySelectorAll<HTMLElement>('[data-xth-image-ref], span').forEach((node) => {
 		if (
 			node.hasAttribute('data-xth-image-ref') ||
-			(node.style.fontSize === '0px' && sources.includes(node.textContent?.trim() || ''))
+			(node.style.fontSize === '0px' &&
+				visuals.some((visual) => visual.sources.includes(node.textContent?.trim() || '')))
 		)
 			node.remove();
 	});
-	for (const [imageIndex, img] of imagesIn(clone).entries()) {
-		const index = imageUrls.indexOf(sources[imageIndex]);
-		const marker = index >= 0 ? '[图片' + (index + 1) + ']' : '[图片无法读取]';
-		if (img === clone) return marker;
-		img.replaceWith(root.ownerDocument.createTextNode(marker));
+	for (const visual of visuals) {
+		const copy = copies[originals.indexOf(visual.element)];
+		if (copy !== clone && !clone.contains(copy)) continue;
+		const marker = visual.sources
+			.map((source) => {
+				const index = source ? imageUrls.indexOf(source) : -1;
+				return index >= 0 ? '[图片' + (index + 1) + ']' : '[图片无法读取]';
+			})
+			.join(' ');
+		if (visual.background) copy.prepend(root.ownerDocument.createTextNode(marker + ' '));
+		else if (copy === clone) return marker;
+		else copy.replaceWith(root.ownerDocument.createTextNode(marker));
 	}
 	clone.querySelectorAll('script, style').forEach((node) => node.remove());
 	clone.querySelectorAll('br').forEach((node) => node.replaceWith(root.ownerDocument.createTextNode('\n')));

@@ -104,3 +104,20 @@ test('stops before the next matching write after cancellation', async t=>{
   await assert.rejects(api.fillLineAnswer('b#a',root,async()=>{cancelled=true;},()=>cancelled),/取消/);
   assert.equal(root.querySelectorAll('select')[1].value,'');
 });
+
+test('a missing control or missing right-column text rejects the entire matching question before any write',async t=>{
+  const e=fixture(t);e.root.querySelectorAll('select')[1].remove();
+  assert.equal(e.api.collectLineOptionGroups(e.root).length,0);assert.equal(e.api.readLineAnswer(e.root),undefined);
+  assert.equal((await e.api.fillLineAnswer('b',e.root,delay)).finish,false);
+  assert.equal(e.root.querySelector('select').value,'-1');
+  const other=fixture(t);other.root.querySelector('.secondUlList').remove();
+  assert.equal(other.api.collectLineOptionGroups(other.root).length,0);
+});
+test('matching pair labels determine source order and duplicates or missing source labels are rejected',t=>{
+  const e=fixture(t);const {normalizeAnswerByQuestionType}=loadTS('packages/scripts/src/utils/ai.ts',e.globals);
+  const groups=e.api.collectLineOptionGroups(e.root);
+  assert.equal(normalizeAnswerByQuestionType('2-a, 1-b','line',groups),'b#a');
+  assert.equal(normalizeAnswerByQuestionType('B-a; A-b','line',groups),'b#a');
+  for(const value of ['1-a, 1-b','1-a','3-a, 1-b','2-a, 0-b'])
+    assert.equal(normalizeAnswerByQuestionType(value,'line',groups),'');
+});

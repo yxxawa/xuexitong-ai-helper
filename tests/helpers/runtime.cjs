@@ -27,7 +27,7 @@ class Clock {
     this.timers.set(id, { fn, due: this.now + Math.max(0, ms), interval });
     return id;
   }
-  async flush() { for (let i = 0; i < 10; i++) await Promise.resolve(); }
+  async flush() { for (let i = 0; i < 50; i++) await Promise.resolve(); }
   async advance(ms) {
     const until = this.now + ms;
     await this.flush();
@@ -57,6 +57,9 @@ class Clock {
 function domRuntime(html = '', url = 'https://chat.deepseek.com/#xth-bridge') {
   const dom = new JSDOM('<!doctype html><html><body>' + html + '</body></html>', { url });
   const w = dom.window;
+  Object.defineProperty(w.HTMLElement.prototype, 'innerText', {
+    get() { return this.textContent; }, set(value) { this.textContent = value; }, configurable: true
+  });
   w.HTMLElement.prototype.getClientRects = function () {
     return this.hidden || this.closest('[hidden], [style*="display: none"]') ? [] : [{}];
   };
@@ -68,7 +71,7 @@ function domRuntime(html = '', url = 'https://chat.deepseek.com/#xth-bridge') {
   return { dom, window: w, document: w.document, globals };
 }
 
-function loadTS(entry, globals = {}) {
+function loadTS(entry, globals = {}, stubs = {}) {
   const context = vm.createContext({ console, setTimeout, clearTimeout, setInterval, clearInterval,
     URL, crypto: webcrypto, ...globals });
   const cache = new Map();
@@ -84,9 +87,16 @@ function loadTS(entry, globals = {}) {
     const module = { exports: {} };
     cache.set(file, module);
     const localRequire = name => {
-      if (name.startsWith('.')) {
-        const target = path.resolve(path.dirname(file), name);
-        return load(fs.existsSync(target + '.ts') ? target + '.ts' : target);
+      if (Object.hasOwn(stubs, name)) return stubs[name];
+      let target;
+      if (name.startsWith('.')) target = path.resolve(path.dirname(file), name);
+      else if (name.startsWith('@xuexitong-ai-helper/core/'))
+        target = path.join(ROOT, 'packages/core', name.slice('@xuexitong-ai-helper/core/'.length));
+      if (target) {
+        const resolved = [target + '.ts', target + '.js', path.join(target, 'index.ts'), target]
+          .find(candidate => fs.existsSync(candidate) && fs.statSync(candidate).isFile());
+        if (!resolved) throw new Error('Unresolved import: ' + name);
+        return load(resolved);
       }
       return require(name);
     };
@@ -109,7 +119,12 @@ function storage() {
       for (const [, listener] of listeners) if (listener.key === key)
         queueMicrotask(() => listener.fn(key, old, plain(value), true));
     },
-    GM_deleteValue: key => values.delete(key),
+    GM_deleteValue: key => {
+      const old = plain(values.get(key));
+      values.delete(key);
+      for (const [, listener] of listeners) if (listener.key === key)
+        queueMicrotask(() => listener.fn(key, old, undefined, true));
+    },
     GM_listValues: () => [...values.keys()],
     GM_addValueChangeListener: (key, fn) => { const id = next++; listeners.set(id, {key,fn}); return id; },
     GM_removeValueChangeListener: id => listeners.delete(id)

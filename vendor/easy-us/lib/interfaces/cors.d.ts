@@ -4,6 +4,7 @@
 export declare class CorsEventEmitter {
     eventMap: Map<string, number>;
     private eventKey;
+    private cleanupExpired;
     tempKey(...args: string[]): string;
     keyOfReturn(id: string): string;
     keyOfArguments(id: string): string;
@@ -14,7 +15,7 @@ export declare class CorsEventEmitter {
      * @param args 事件参数
      * @param callback 事件回调，可以接收返回值
      */
-    emit(name: string, args?: any[], callback?: (returnValue: any) => void): void;
+    emit(name: string, args?: any[], callback?: (returnValue: any) => void, onError?: (error: Error) => void): void;
     /**
      * 监听跨域事件
      * @param name 事件名，全局唯一

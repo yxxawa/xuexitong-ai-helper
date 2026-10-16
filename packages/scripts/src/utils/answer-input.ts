@@ -29,6 +29,7 @@ function textAnswerElements(option: HTMLElement) {
 /** Input mutations must notify the platform, and never interpret a model answer as executable HTML. */
 export function fillTextAnswer(option: HTMLElement, answer: string) {
 	const { text, body } = textAnswerElements(option);
+	if (!option.isConnected || text?.disabled || text?.readOnly) throw new Error('输入框不可编辑，未标记为完成。');
 	if (!text && !body) throw new Error('未找到可填写的输入框，未标记为完成，请手动检查。');
 	if (text) {
 		text.value = answer;
@@ -43,7 +44,7 @@ export function fillTextAnswer(option: HTMLElement, answer: string) {
 		body.dispatchEvent(new body.ownerDocument.defaultView!.Event('change', { bubbles: true }));
 	}
 }
-function optionRow(option: HTMLElement): HTMLElement {
+export function optionRow(option: HTMLElement): HTMLElement {
 	const row = option.closest('li') || option.parentElement || option;
 	// Some versions render all answer_p elements directly in one answerBg. Never
 	// borrow another option's checked input/marker from that shared container.
@@ -125,20 +126,13 @@ export function readPageAnswer(
 			return inputs.map((input) => input.value.trim()).join('#');
 	}
 }
-export function clearOtherMultipleOptions(options: HTMLElement[], answer: string) {
-	if (!/^[A-Z](?:#[A-Z])*$/.test(answer)) return;
-	const selected = new Set(answer.split('#').map((letter) => letter.charCodeAt(0) - 65));
-	if ([...selected].some((index) => index >= options.length)) return;
-	options.forEach((option, index) => {
-		if (!selected.has(index) && isOptionChecked(option)) option.click();
-	});
-}
 export async function fillGroupedChoices(
 	answer: string,
 	groups: HTMLElement[],
 	selector: string,
 	delay: () => Promise<unknown>,
-	cancelled: () => boolean = () => false
+	cancelled: () => boolean = () => false,
+	beforeWrite?: () => Promise<void>
 ) {
 	const answers = answer.split('#').map((value) => value.trim());
 	if (!groups.length || answers.length !== groups.length || answers.some((value) => !value)) return { finish: false };
@@ -147,9 +141,18 @@ export async function fillGroupedChoices(
 	);
 	if (targets.some((target) => !target)) return { finish: false };
 	for (const target of targets) {
+		await beforeWrite?.();
 		if (cancelled()) throw new Error('答题已取消');
+		if (!target!.isConnected || target!.matches('[aria-disabled="true"],.disabled')) return { finish: false };
 		(target!.querySelector<HTMLElement>('a') || target!).click();
 		await delay();
 	}
-	return { finish: true };
+	await beforeWrite?.();
+	if (cancelled()) throw new Error('答题已取消');
+	return {
+		finish: groups.every((group, index) => {
+			const input = group.querySelector<HTMLInputElement>('input[name^="answer"]');
+			return group.isConnected && input?.value.trim() === answers[index];
+		})
+	};
 }

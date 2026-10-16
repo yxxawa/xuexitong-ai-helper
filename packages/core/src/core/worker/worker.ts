@@ -65,6 +65,10 @@ export class CourseWorker<E extends RawElements = RawElements> extends CommonEve
 		await this.activeRun?.catch(() => undefined);
 	}
 
+	async waitUntilReady() {
+		if (!(await this.ready())) throw new Error('答题已取消');
+	}
+
 	private async ready() {
 		while (this.isStop && !this.isClose) await $.sleep(100);
 		return !this.isClose;
@@ -87,6 +91,8 @@ export class CourseWorker<E extends RawElements = RawElements> extends CommonEve
 			if (!(await this.ready())) return results;
 			const ctx: WorkContext<E> = {
 				isCancelled: () => this.isClose,
+				isPaused: () => this.isStop,
+				waitUntilReady: () => this.waitUntilReady(),
 				searchInfos: [],
 				root,
 				elements: domSearchAll<E>(this.opts.elements, root),
@@ -133,9 +139,9 @@ export class CourseWorker<E extends RawElements = RawElements> extends CommonEve
 		}
 		// A failed display/storage callback must not strand the request queue.
 		let updates = Promise.resolve();
-		const update = (index: number) => {
+		const update = (index: number, allowClosed = false) => {
 			updates = updates.then(async () => {
-				if (this.isClose) return;
+				if (this.isClose && !allowClosed) return;
 				try {
 					await this.opts.onResultsUpdate?.(results[index], index, results);
 				} catch (error) {
@@ -211,6 +217,7 @@ export class CourseWorker<E extends RawElements = RawElements> extends CommonEve
 							infos,
 							ctx.elements.options as HTMLElement[],
 							async (type, answer, option, context) => {
+								await ctx.waitUntilReady?.();
 								if (this.isClose) throw new Error('答题已取消');
 								await handler(type, answer, option, context);
 							}
@@ -226,6 +233,15 @@ export class CourseWorker<E extends RawElements = RawElements> extends CommonEve
 		};
 		const threads = Math.max(1, Math.min(8, Math.floor(Number(this.opts.thread)) || 1));
 		await Promise.all([resolveLoop(), ...Array.from({ length: threads }, () => requestLoop())]);
+		if (this.isClose) {
+			for (const result of results) {
+				if (result.resolved) continue;
+				result.requested = result.resolved = true;
+				result.result = { finish: false };
+				result.error = '答题已取消';
+			}
+			await update(results.length - 1, true);
+		}
 		if (options?.enable_debug) console.debug('答题结果', results);
 		return results;
 	}

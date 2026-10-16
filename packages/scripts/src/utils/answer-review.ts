@@ -1,3 +1,4 @@
+import type { AIRequestControl } from './request-control';
 import { queryAIAnswerer, normalizeAnswerByQuestionType, type AIAnswererOptions, type AIQuestionPayload } from './ai';
 import { acquireWebActivity, type WebActivityLease } from './web-activity';
 import type { SearchInformation } from '@xuexitong-ai-helper/core/src/core/worker/search.interface';
@@ -14,7 +15,7 @@ export interface ReviewTarget {
 	available(): void;
 	snapshot(): { question: AIQuestionPayload; answer: string };
 	options(): AIAnswererOptions;
-	apply(infos: SearchInformation[]): Promise<boolean>;
+	apply(infos: SearchInformation[], control?: AIRequestControl): Promise<boolean>;
 	commit(opts: AIAnswererOptions, question: AIQuestionPayload, infos: SearchInformation[]): Promise<void>;
 	query?: typeof queryAIAnswerer;
 }
@@ -39,6 +40,14 @@ export class AnswerReview {
 		opts: AIAnswererOptions;
 	};
 	constructor(private target: ReviewTarget) {}
+	budget(action: ReviewAction) {
+		if (action !== 'check') return 2 * 60 * 1000;
+		const opts = this.target.options();
+		// Web mailboxes allow 30 minutes including queueing, plus image loading/activity setup.
+		return opts.aiProvider === 'deepseek-web'
+			? 32 * 60 * 1000
+			: 2 * Math.max(5, Math.min(600, Number(opts.aiAnswerTimeout) || 120)) * 1000 + 2 * 60 * 1000;
+	}
 	private snapshot() {
 		this.target.available();
 		const state = this.target.snapshot();
@@ -51,7 +60,11 @@ export class AnswerReview {
 		if (JSON.stringify(now) !== JSON.stringify(before))
 			throw new Error('题目或当前答案已变化，请重新检验，未采用旧建议。');
 	}
-	async run(action: ReviewAction, proposalId?: string): Promise<ReviewFeedback> {
+	async run(action: ReviewAction, proposalId?: string, control: AIRequestControl = {}): Promise<ReviewFeedback> {
+		const assertActive = () => {
+			if (control.isCancelled?.()) throw new Error('检验已取消，未采用旧结果。');
+		};
+		assertActive();
 		if (this.busy) throw new Error('本题正在检验或写入，请勿重复操作。');
 		this.busy = true;
 		let lease: WebActivityLease | undefined;
@@ -65,14 +78,17 @@ export class AnswerReview {
 			if (!opts) throw new Error('建议已失效，请重新检验。');
 			this.target.available();
 			if (opts.aiProvider === 'deepseek-web') lease = await acquireWebActivity('search');
+			assertActive();
 			if (action === 'check') {
 				this.proposal = undefined;
 				const before = this.snapshot();
 				// Deliberately bypass QuestionAnswerCache: a check must be a fresh AI request.
 				const infos = await (this.target.query || queryAIAnswerer)(
 					{ ...opts, webActivityId: lease?.id },
-					{ ...before.question, reviewAnswer: before.answer }
+					{ ...before.question, reviewAnswer: before.answer },
+					control
 				);
+				assertActive();
 				this.unchanged(before);
 				const info = infos.find(
 					(info) => !info.error && !(info.data as any)?.skipped && info.results.some((result) => result.answer?.trim())
@@ -98,7 +114,9 @@ export class AnswerReview {
 			if (!proposal || proposal.id !== proposalId) throw new Error('建议已失效，请重新检验。');
 			this.unchanged(proposal.before);
 			lease?.assertActive();
-			const applied = await this.target.apply(proposal.infos);
+			assertActive();
+			const applied = await this.target.apply(proposal.infos, control);
+			assertActive();
 			const after = this.snapshot();
 			if (
 				!applied ||
@@ -119,20 +137,90 @@ export class AnswerReview {
 const targets = new Map<string, AnswerReview>();
 const rootIds = new WeakMap<HTMLElement, string>();
 const views = new Map<string, { busy?: boolean; feedback?: ReviewFeedback; error?: string }>();
+const cancelledReviews = new Set<string>();
+const outgoing = new Set<string>();
 const PREFIX = 'xth.review.request.v1.';
 const FRAME = uuid();
+const OWNER_MAX_AGE = 3 * 60 * 1000;
 let listening = false;
+let timer: ReturnType<typeof setInterval> | undefined;
 interface Mailbox {
 	target: string;
 	action: ReviewAction;
 	proposalId?: string;
 	createdAt: number;
+	updatedAt?: number;
+	deadlineAt?: number;
 	status: 'queued' | 'processing' | 'done' | 'error';
 	response?: ReviewFeedback;
 	error?: string;
 }
+function reviewBudget(target: AnswerReview, action: ReviewAction) {
+	return target.budget(action);
+}
 export function assertQuestionReviewIdle() {
 	if ([...targets.values()].some((target) => target.busy)) throw new Error('正在检验或采用答案，请等待完成后再答题。');
+}
+function tickReviews() {
+	for (const key of GM_listValues().filter((key) => key.startsWith(PREFIX + FRAME + '.'))) {
+		const message = GM_getValue<Mailbox | undefined>(key, undefined);
+		if (!message || !Number.isFinite(message.createdAt) || Date.now() - message.createdAt > 60 * 60 * 1000) {
+			GM_deleteValue(key);
+			continue;
+		}
+		if (message.status === 'processing') {
+			if (Date.now() > (message.deadlineAt || 0))
+				GM_setValue(key, { ...message, status: 'error', error: '检验请求超时，已取消本次检验。' });
+			else if (Date.now() - (message.updatedAt || 0) >= 1000) GM_setValue(key, { ...message, updatedAt: Date.now() });
+			continue;
+		}
+		if (message.status !== 'queued') continue;
+		void (async () => {
+			try {
+				const target = targets.get(message.target);
+				if (!target || !['check', 'accept', 'reject'].includes(message.action))
+					throw new Error('原题页面已变化，请重新读取题目后检验。');
+				const deadlineAt = Date.now() + reviewBudget(target, message.action);
+				GM_setValue(key, { ...message, status: 'processing', deadlineAt, updatedAt: Date.now() });
+				const control = {
+					isCancelled: () => {
+						const current = GM_getValue<Mailbox | undefined>(key, undefined);
+						return !current || current.status !== 'processing' || Date.now() > deadlineAt;
+					}
+				};
+				const response = await target.run(message.action, message.proposalId, control);
+				if (!control.isCancelled()) GM_setValue(key, { ...message, status: 'done', response, updatedAt: Date.now() });
+			} catch (error) {
+				const current = GM_getValue<Mailbox | undefined>(key, undefined);
+				if (current?.status === 'queued' || current?.status === 'processing')
+					GM_setValue(key, {
+						...current,
+						status: 'error',
+						error: error instanceof Error ? error.message : String(error)
+					});
+			}
+		})();
+	}
+}
+function startReviewService() {
+	if (timer === undefined && targets.size && typeof GM_listValues === 'function') timer = setInterval(tickReviews, 250);
+}
+function ensureReviewLifecycle() {
+	if (!listening) {
+		listening = true;
+		window.addEventListener('pageshow', startReviewService);
+		window.addEventListener('pagehide', () => {
+			clearInterval(timer);
+			timer = undefined;
+			for (const key of outgoing) GM_deleteValue(key);
+			for (const key of GM_listValues().filter((key) => key.startsWith(PREFIX + FRAME + '.'))) {
+				const message = GM_getValue<Mailbox | undefined>(key, undefined);
+				if (message?.status === 'processing' || message?.status === 'queued')
+					GM_setValue(key, { ...message, status: 'error', error: '原题页面已离开，本次检验已取消。' });
+			}
+			for (const [id, view] of views) if (view.busy) cancelledReviews.add(id);
+		});
+	}
 }
 export function registerAnswerReview(root: HTMLElement, target: ReviewTarget): string {
 	const previous = rootIds.get(root);
@@ -140,60 +228,36 @@ export function registerAnswerReview(root: HTMLElement, target: ReviewTarget): s
 	const id = FRAME + '.' + uuid();
 	rootIds.set(root, id);
 	targets.set(id, new AnswerReview(target));
-	if (!listening && typeof GM_listValues === 'function') {
-		listening = true;
-		const timer = setInterval(() => {
-			for (const key of GM_listValues().filter((key) => key.startsWith(PREFIX + FRAME + '.'))) {
-				const message = GM_getValue<Mailbox | undefined>(key, undefined);
-				if (!message || Date.now() - message.createdAt > 12 * 60 * 1000) {
-					GM_deleteValue(key);
-					continue;
-				}
-				if (message.status !== 'queued') continue;
-				GM_setValue(key, { ...message, status: 'processing' });
-				void (async () => {
-					try {
-						const target = targets.get(message.target);
-						if (!target) throw new Error('原题页面已变化，请重新读取题目后检验。');
-						const response = await target.run(message.action, message.proposalId);
-						if (GM_getValue(key, undefined)) GM_setValue(key, { ...message, status: 'done', response });
-					} catch (error) {
-						if (GM_getValue(key, undefined))
-							GM_setValue(key, {
-								...message,
-								status: 'error',
-								error: error instanceof Error ? error.message : String(error)
-							});
-					}
-				})();
-			}
-		}, 250);
-		window.addEventListener(
-			'pagehide',
-			() => {
-				clearInterval(timer);
-				targets.clear();
-			},
-			{ once: true }
-		);
-	}
+	startReviewService();
+	ensureReviewLifecycle();
 	return id;
 }
 export const getAnswerReviewView = (id: string) => views.get(id);
-/** Route actions to the frame that owns the question instead of trying to write its parent page. */
+export const cancelAnswerReview = (id: string) => {
+	cancelledReviews.add(id);
+};
+/** The owner publishes its budget and heartbeat; a slow but live web request is not a dead frame. */
 export async function requestAnswerReview(id: string, action: ReviewAction, proposalId?: string) {
+	ensureReviewLifecycle();
 	if (views.get(id)?.busy) return;
+	cancelledReviews.delete(id);
 	views.set(id, { ...views.get(id), busy: true, error: undefined });
 	let key: string | undefined;
 	try {
 		let response: ReviewFeedback;
 		const local = targets.get(id);
-		if (local) response = await local.run(action, proposalId);
-		else {
+		if (local) {
+			const deadlineAt = Date.now() + reviewBudget(local, action);
+			response = await local.run(action, proposalId, {
+				isCancelled: () => cancelledReviews.has(id) || Date.now() > deadlineAt
+			});
+		} else {
 			key = PREFIX + id.split('.')[0] + '.' + uuid();
 			const message: Mailbox = { target: id, action, proposalId, createdAt: Date.now(), status: 'queued' };
+			outgoing.add(key);
 			GM_setValue(key, message);
 			for (;;) {
+				if (cancelledReviews.has(id)) throw new Error('检验已取消。');
 				const current = GM_getValue<Mailbox | undefined>(key, undefined);
 				if (!current || current.status === 'error')
 					throw new Error(current?.error || '原题页面已离开，请重新打开后检验。');
@@ -203,9 +267,11 @@ export async function requestAnswerReview(id: string, action: ReviewAction, prop
 				}
 				if (
 					(current.status === 'queued' && Date.now() - message.createdAt > 8000) ||
-					Date.now() - message.createdAt > 11 * 60 * 1000
+					(current.status === 'processing' &&
+						(Date.now() > (current.deadlineAt || 0) ||
+							Date.now() - (current.updatedAt || message.createdAt) > OWNER_MAX_AGE))
 				)
-					throw new Error('原题页面未响应，请保持题目页打开并重试。');
+					throw new Error('原题页面未响应或检验超时，本次检验已取消。');
 				await new Promise((resolve) => setTimeout(resolve, 250));
 			}
 		}
@@ -216,6 +282,10 @@ export async function requestAnswerReview(id: string, action: ReviewAction, prop
 	} finally {
 		const view = views.get(id);
 		if (view) view.busy = false;
-		if (key) GM_deleteValue(key);
+		cancelledReviews.delete(id);
+		if (key) {
+			outgoing.delete(key);
+			GM_deleteValue(key);
+		}
 	}
 }

@@ -50,7 +50,7 @@ export function commonWork(
 
 	/** 显示答题控制按钮 */
 	const createWorkControlPanel = () => {
-		const { completeBtn, controlBtn, restartBtn, startBtn } = createWorkerControl({
+		const { completeBtn, controlBtn, restartBtn, startBtn, stopBtn } = createWorkerControl({
 			workerProvider: () => worker,
 			activityId: () => activity?.id,
 			onStart: async () => {
@@ -60,6 +60,20 @@ export function commonWork(
 				}
 				await closeAIConfigEmptyWarning();
 				return start();
+			},
+			onStop: async () => {
+				if (starting) return;
+				starting = true;
+				try {
+					worker?.emit('close');
+					await (worker as any)?.waitForIdle?.();
+					running = false;
+					activity?.release();
+					activity = undefined;
+					renderPanels.forEach((render) => render());
+				} finally {
+					starting = false;
+				}
 			},
 			onRestart: () => start(undefined, true),
 			onCompleteUnfinished: () => start(undefined, true, true)
@@ -74,15 +88,19 @@ export function commonWork(
 		controlBtn.style.flex = '1';
 		controlBtn.style.padding = '4px';
 
+		[controlBtn, stopBtn, completeBtn, restartBtn, startBtn].forEach((button) => {
+			button.style.minWidth = '78px';
+			button.style.flex = '1';
+		});
 		const container = h(
 			'div',
-			{ style: { marginTop: '12px', display: 'flex', gap: '6px' } },
-			running ? [controlBtn, completeBtn, restartBtn] : [startBtn, completeBtn]
+			{ style: { marginTop: '12px', display: 'flex', flexWrap: 'wrap', gap: '6px' } },
+			running ? [controlBtn, stopBtn, completeBtn, restartBtn] : [startBtn, completeBtn]
 		);
 
 		globalControlPanel = container;
 
-		return { container, startBtn, restartBtn, controlBtn };
+		return { container, startBtn, restartBtn, controlBtn, stopBtn };
 	};
 	const workResultPanel = () => CommonProject.scripts.workResults.methods.createWorkResultsPanel();
 
@@ -153,7 +171,7 @@ export function commonWork(
 		try {
 			assertQuestionReviewIdle();
 			if (replace) {
-				if (running) $message.info('正在停止；等待已发出的请求返回后重启，避免重复请求。');
+				if (running) $message.info('正在取消当前任务，完成停止后重新开始。');
 				worker?.emit('close');
 				// Let an already sent request settle before replacing its worker; do not send it twice.
 				await (worker as any)?.waitForIdle?.();
@@ -181,7 +199,7 @@ export function commonWork(
 			running = true;
 			worker = options.workerProvider(workOptions);
 			const currentWorker = worker;
-			const { container, controlBtn } = createWorkControlPanel();
+			const { container, controlBtn, stopBtn } = createWorkControlPanel();
 			script.panel?.body?.replaceChildren(container, workResultPanel());
 			worker?.once('done', () => {
 				if (worker !== currentWorker) return;
@@ -192,6 +210,7 @@ export function commonWork(
 				}
 				globalControlPanel = null;
 				controlBtn.disabled = true;
+				stopBtn.disabled = true;
 			});
 			if (worker) await options.onWorkerCreated?.(worker);
 			else running = false;
@@ -217,6 +236,7 @@ export function commonWork(
 export function createWorkerControl(options: {
 	workerProvider: () => CommonEventEmitter<WorkerEvents> | undefined;
 	onStart: () => void | Promise<void>;
+	onStop: () => void | Promise<void>;
 	onRestart: () => void | Promise<void>;
 	onCompleteUnfinished: () => void | Promise<void>;
 	activityId?: () => string | undefined;
@@ -227,6 +247,9 @@ export function createWorkerControl(options: {
 	const completeBtn = $ui.button('🧩补全未完成');
 	const restartBtn = $ui.button('🔃重新答题');
 	const controlBtn = $ui.button(stop ? '▶️继续' : '⏸暂停');
+	controlBtn.title = '暂停后不再写入答案或重试；已发送的回答可能继续生成，继续后再处理。';
+	const stopBtn = $ui.button('⏹停止');
+	stopBtn.title = '取消当前请求和后续作答';
 
 	let actionPending = false;
 	const refresh = () => {
@@ -257,6 +280,7 @@ export function createWorkerControl(options: {
 			refresh();
 		}
 	};
+	stopBtn.onclick = action(options.onStop);
 	startBtn.onclick = action(options.onStart);
 	restartBtn.onclick = action(options.onRestart);
 	completeBtn.onclick = action(options.onCompleteUnfinished);
@@ -267,13 +291,13 @@ export function createWorkerControl(options: {
 		worker?.emit?.(stop ? 'stop' : 'continuate');
 		controlBtn.value = stop ? '▶️继续' : '⏸️暂停';
 		if (stop) {
-			stopMessage = $message.warn({ duration: 0, content: '暂停中...' });
+			stopMessage = $message.warn({ duration: 0, content: '已暂停：停止写入答案和重试，点击继续后恢复。' });
 		} else {
 			stopMessage?.remove();
 		}
 	};
 
-	return { startBtn, completeBtn, restartBtn, controlBtn };
+	return { startBtn, completeBtn, restartBtn, controlBtn, stopBtn };
 }
 
 /**

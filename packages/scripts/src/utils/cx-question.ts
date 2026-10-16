@@ -93,19 +93,29 @@ function lineOptions(box: HTMLElement, imageUrls: string[]) {
 export function collectLineOptionGroups(root: HTMLElement, imageUrls: string[] = []): AILineOptionGroup[] {
 	const left = columnItems(root, LEFT_COLUMN, imageUrls);
 	const right = columnItems(root, RIGHT_COLUMN, imageUrls);
-	return lineSelectBoxes(root).map((box, index) => ({
+	const boxes = lineSelectBoxes(root);
+	if (
+		!boxes.length ||
+		(root.querySelector(LEFT_COLUMN) && (left.length !== boxes.length || left.some((text) => !text.trim()))) ||
+		(root.querySelector(RIGHT_COLUMN) && (!right.length || right.some((text) => !text.trim())))
+	)
+		return [];
+	let incomplete = false;
+	const groups = boxes.map((box, index) => ({
 		index,
 		title: left[index] || `第 ${index + 1} 个连线项`,
 		options: lineOptions(box, imageUrls).map((option) => {
-			// Native menus often contain only A/B/C; attach the corresponding right-column text, not an ordinal guess.
 			const label = option.text.replace(/[.、．:：)）\s]+$/g, '');
 			const matches = right.filter((text) => {
 				const key = text.match(/^\s*([A-Za-z]+|\d+)[.、．:：)）\s]/)?.[1];
 				return key && (key.toLowerCase() === label.toLowerCase() || key === option.value);
 			});
+			// A menu containing only labels is meaningful only when its column text is available.
+			if (/^[A-Za-z]$/.test(label) && matches.length !== 1) incomplete = true;
 			return { value: option.value, text: matches.length === 1 ? matches[0] : option.text };
 		})
 	}));
+	return incomplete || groups.some((group) => !group.options.length) ? [] : groups;
 }
 
 function legacyAnswerInputs(root: HTMLElement): HTMLInputElement[] {
@@ -117,7 +127,7 @@ function legacyAnswerInputs(root: HTMLElement): HTMLInputElement[] {
 /** Never treat a placeholder or a partially answered set as a finished question. */
 export function readLineAnswer(root: HTMLElement): string | undefined {
 	const boxes = lineSelectBoxes(root);
-	if (!boxes.length) return;
+	if (!boxes.length || collectLineOptionGroups(root).length !== boxes.length) return;
 	const legacy = boxes.filter((box) => box.tagName !== 'SELECT');
 	const inputs = legacyAnswerInputs(root);
 	if (legacy.length && inputs.length !== legacy.length) return;
@@ -134,18 +144,21 @@ export async function fillLineAnswer(
 	answer: string,
 	root: HTMLElement,
 	delay: () => Promise<unknown>,
-	cancelled: () => boolean = () => false
+	cancelled: () => boolean = () => false,
+	beforeWrite?: () => Promise<void>
 ): Promise<{ finish: boolean }> {
 	const boxes = lineSelectBoxes(root);
 	const answers = answer.split('#').map((value) => value.trim());
 	if (
 		!boxes.length ||
+		collectLineOptionGroups(root).length !== boxes.length ||
 		boxes.some((box) => !box.isConnected || (box.tagName === 'SELECT' && (box as HTMLSelectElement).disabled)) ||
 		answers.length !== boxes.length ||
 		answers.some((value, index) => !lineOptions(boxes[index], []).some((option) => option.value === value))
 	)
 		return { finish: false };
 	for (let index = 0; index < boxes.length; index++) {
+		await beforeWrite?.();
 		if (cancelled()) throw new Error('答题已取消');
 		const box = boxes[index];
 		if (!box.isConnected) return { finish: false };
@@ -169,5 +182,6 @@ export async function fillLineAnswer(
 		}
 		await delay();
 	}
+	await beforeWrite?.();
 	return { finish: !cancelled() && readLineAnswer(root) === answers.join('#') };
 }

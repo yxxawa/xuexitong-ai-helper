@@ -1,4 +1,6 @@
-import { requestAnswerReview, getAnswerReviewView } from '../utils/answer-review';
+import type { AIRequestControl } from '../utils/request-control';
+import { exportSettings, parseSettings, settingsSchema } from '../utils/settings-transfer';
+import { requestAnswerReview, getAnswerReviewView, cancelAnswerReview } from '../utils/answer-review';
 import {
 	acquireWebActivity,
 	assertWebActivity,
@@ -72,6 +74,7 @@ const questionCache: QuestionAnswerCache = new QuestionAnswerCache({
 });
 
 type SearchAnswerOptions = {
+	control?: AIRequestControl;
 	webActivityId?: string;
 	providerConfig?: AIAnswererOptions;
 	type?: string;
@@ -578,7 +581,16 @@ export const CommonProject = Project.create({
 					'答案缓存（' + questionCache.list().length + '）'
 				);
 				const status = h('div', { id: 'xth-vision-status', className: 'secondary' }, visionStatusText());
-				const actions = h('div', { className: 'settings-actions' }, [cache]);
+				const backup = h(
+					'button',
+					{
+						type: 'button',
+						className: 'base-style-button',
+						onclick: () => CommonProject.scripts.render.methods.pin(CommonProject.scripts.apps)
+					},
+					'设置备份与恢复'
+				);
+				const actions = h('div', { className: 'settings-actions' }, [cache, backup]);
 				if ($gm.isInGMContext())
 					actions.append(
 						h(
@@ -1237,11 +1249,11 @@ export const CommonProject = Project.create({
 						const options = typeof optionsOrWhenSearchEmpty === 'function' ? {} : optionsOrWhenSearchEmpty;
 						const fallback =
 							typeof optionsOrWhenSearchEmpty === 'function' ? optionsOrWhenSearchEmpty : whenSearchEmpty;
-						const { webActivityId, providerConfig, ...question } = options;
+						const { webActivityId, providerConfig, control, ...question } = options;
 						const config = { ...(providerConfig || CommonProject.scripts.settings.cfg), webActivityId };
 						if (config.aiProvider === 'deepseek-web') assertWebActivity(webActivityId);
 						return questionCache.search(config, { title, ...question }, async () =>
-							fallback ? await fallback() : searchAnswer(title, question, config)
+							fallback ? await fallback() : searchAnswer(title, question, config, control)
 						);
 					}
 				};
@@ -1258,63 +1270,60 @@ export const CommonProject = Project.create({
 
 				const cachesBtn = h('button', { type: 'button', onclick: showQuestionCacheDialog }, '答案缓存');
 
-				const exportSetting = $ui.tooltip(
-					h(
-						'div',
-						{
-							innerText: '📤 导出全部设置',
-							style: btnStyle,
-							title: '导出全部页面的设置，包括 AI 参数、章节学习参数等等。（文件后缀名为：.xthsetting）'
-						},
-						(btn) => {
-							btn.onclick = () => {
-								const setting = Object.create({});
-								for (const key of $store.list()) {
-									const val = $store.get(key);
-									if (val) {
-										Reflect.set(setting, key, val);
-									}
-								}
-								const blob = new Blob([JSON.stringify(setting, null, 2)], { type: 'text/plain' });
-								const url = URL.createObjectURL(blob);
-								const a = h('a', { href: url, download: 'xuexitong-ai-helper-setting.xthsetting' });
-								a.click();
-								URL.revokeObjectURL(url);
-							};
-						}
-					)
+				const schema = () =>
+					settingsSchema([...Object.values(CommonProject.scripts), ...Object.values(CXProject.scripts), RenderScript]);
+				const exportSetting = h(
+					'button',
+					{
+						type: 'button',
+						style: btnStyle,
+						title: '导出 AI 与学习设置，包含 API Key；请妥善保管文件。运行记录和答案缓存不包含在内。'
+					},
+					'📤 导出全部设置'
 				);
-
-				const importSetting = $ui.tooltip(
-					h(
-						'div',
-						{
-							innerText: '📥 导入全部设置',
-							style: btnStyle,
-							title: '导入并且覆盖当前的全部设置。（文件后缀名为：.xthsetting）'
-						},
-						(btn) => {
-							btn.onclick = () => {
-								const input = h('input', { type: 'file', accept: '.xthsetting' });
-								input.onchange = async () => {
-									const file = input.files?.[0];
-									if (file) {
-										const setting = await file.text();
-										const obj = JSON.parse(setting);
-										for (const key of Object.keys(obj)) {
-											$store.set(key, obj[key]);
-										}
-										$message.success({ content: '设置导入成功，页面即将刷新。', duration: 3 });
-										setTimeout(() => {
-											location.reload();
-										}, 3000);
-									}
-								};
-								input.click();
-							};
-						}
-					)
+				exportSetting.onclick = () => {
+					try {
+						const setting = exportSettings(schema(), (key) => $store.get(key));
+						const url = URL.createObjectURL(new Blob([JSON.stringify(setting, null, 2)], { type: 'application/json' }));
+						h('a', { href: url, download: 'xuexitong-ai-helper-setting.xthsetting' }).click();
+						setTimeout(() => URL.revokeObjectURL(url), 1000);
+					} catch (error) {
+						$message.error(error instanceof Error ? error.message : String(error));
+					}
+				};
+				const importSetting = h(
+					'button',
+					{
+						type: 'button',
+						style: btnStyle,
+						title: '导入备份中的设置；导入前会校验文件，不恢复运行中的请求或答案缓存。'
+					},
+					'📥 导入全部设置'
 				);
+				importSetting.onclick = () => {
+					const input = h('input', { type: 'file', accept: '.xthsetting,.json' });
+					input.onchange = async () => {
+						try {
+							const file = input.files?.[0];
+							if (!file) return;
+							const parsed = parseSettings(await file.text(), schema());
+							for (const [key, value] of Object.entries(parsed.values)) $store.set(key, value);
+							$message.success({
+								content:
+									'已导入 ' +
+									Object.keys(parsed.values).length +
+									' 项设置' +
+									(parsed.ignored ? '，忽略 ' + parsed.ignored + ' 项旧数据' : '') +
+									'，页面即将刷新。',
+								duration: 3
+							});
+							setTimeout(() => location.reload(), 3000);
+						} catch (error) {
+							$message.error(error instanceof Error ? error.message : String(error));
+						}
+					};
+					input.click();
+				};
 
 				[cachesBtn, exportSetting, importSetting].forEach((btn) => {
 					btn.onmouseover = () => {
@@ -1490,17 +1499,22 @@ const createGuide = () => {
 async function searchAnswer(
 	title: string,
 	searchOptions: SearchAnswerOptions,
-	config: AIAnswererOptions = { ...CommonProject.scripts.settings.cfg }
+	config: AIAnswererOptions = { ...CommonProject.scripts.settings.cfg },
+	control?: AIRequestControl
 ): Promise<SearchInformation[]> {
-	const infos = await queryAIAnswerer(config, {
-		title,
-		type: searchOptions.type,
-		options: searchOptions.options,
-		lineOptions: searchOptions.lineOptions,
-		hasImage: searchOptions.hasImage,
-		unresolvedImageCount: searchOptions.unresolvedImageCount,
-		imageUrls: searchOptions.imageUrls
-	});
+	const infos = await queryAIAnswerer(
+		config,
+		{
+			title,
+			type: searchOptions.type,
+			options: searchOptions.options,
+			lineOptions: searchOptions.lineOptions,
+			hasImage: searchOptions.hasImage,
+			unresolvedImageCount: searchOptions.unresolvedImageCount,
+			imageUrls: searchOptions.imageUrls
+		},
+		control
+	);
 	const error = infos.find((info) => info.error && isSkippedByAIConfig(info) === false)?.error;
 	if (error) {
 		$message.error({ content: 'AI做题请求失败：' + error, duration: 10 });
@@ -1577,7 +1591,14 @@ function createAnswerReviewControls(id: string) {
 		lastView = state;
 		feedback.replaceChildren();
 		if (view?.busy) {
-			feedback.textContent = '正在处理，请勿重复操作…';
+			feedback.append(
+				h('span', '正在处理，请勿重复操作…'),
+				h(
+					'button',
+					{ type: 'button', className: 'base-style-button-secondary', onclick: () => cancelAnswerReview(id) },
+					'取消检验'
+				)
+			);
 			return;
 		}
 		if (view?.error) {

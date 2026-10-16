@@ -29,6 +29,9 @@ export interface WorkContext<E> {
 	reviewId?: string;
 	/** Re-check before each asynchronous DOM write, not just before resolving a question. */
 	isCancelled?: () => boolean;
+	/** Wait before every page mutation; pausing must also suspend an in-flight answer. */
+	waitUntilReady?: () => Promise<void>;
+	isPaused?: () => boolean;
 	root: HTMLElement;
 	elements: SearchedElements<E, HTMLElement[]>;
 	searchInfos: SearchInformation[];

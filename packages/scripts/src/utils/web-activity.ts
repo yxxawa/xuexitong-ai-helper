@@ -1,3 +1,5 @@
+import { WEB_BRIDGE_STATE, WEB_BRIDGE_MAX_AGE, wakeWebBridge } from './web-bridge-state';
+
 /** One enabled receiver arbitrates work/search leases across all learning tabs and iframes. */
 export type WebActivityKind = 'work' | 'search';
 export interface WebActivity {
@@ -17,8 +19,8 @@ export interface WebActivityLease extends WebActivity {
 }
 export const WEB_ACTIVITY_STATE = 'xth.web.activity.v1';
 const PREFIX = 'xth.web.activity.request.v1.';
-const BRIDGE = 'xth.web.bridge.v1';
-const MAX_AGE = 45000;
+const BRIDGE = WEB_BRIDGE_STATE;
+const MAX_AGE = WEB_BRIDGE_MAX_AGE;
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 function receiver() {
 	const state = GM_getValue<
@@ -96,6 +98,7 @@ export async function acquireWebActivity(kind: WebActivityKind): Promise<WebActi
 		updatedAt: Date.now()
 	};
 	GM_setValue(key, request);
+	wakeWebBridge();
 	try {
 		while (Date.now() - request.createdAt < 15000) {
 			const state = GM_getValue<ActivityRequest | undefined>(key, undefined);

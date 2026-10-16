@@ -1,3 +1,5 @@
+import { readLineAnswer } from './cx-question';
+
 /** Keep each blank scoped to its own editor; never borrow a sibling blank's textarea. */
 function textAnswerElements(option: HTMLElement) {
 	const directText = option.matches('textarea,input');
@@ -97,23 +99,23 @@ export function readPageAnswer(
 	} else if (type === 'completion') {
 		const values = options.map(readTextAnswer);
 		if (values.length && values.every(Boolean)) return values.join('#');
-	} else if (type === 'line' || type === 'fill' || type === 'reader') {
+	} else if (type === 'line') {
+		return readLineAnswer(root);
+	} else if (type === 'fill' || type === 'reader') {
 		const inputs = Array.from(
 			root.querySelectorAll<HTMLInputElement>(
 				'.line_answer input[name^="answer"], .reading_answer input[name^="answer"], .filling_answer input[name^="answer"]'
 			)
 		);
 		const groups = Array.from(
-			root.querySelectorAll<HTMLElement>(
-				type === 'line' ? '.line_answer_ct .selectBox' : type === 'reader' ? '.reading_answer' : '.filling_answer'
-			)
+			root.querySelectorAll<HTMLElement>(type === 'reader' ? '.reading_answer' : '.filling_answer')
 		);
 		if (
 			groups.length &&
 			(groups.length !== inputs.length ||
 				groups.some(
 					(group, index) =>
-						!Array.from(group.querySelectorAll(type === 'line' ? 'li[data]' : 'span.saveSingleSelect[data]')).some(
+						!Array.from(group.querySelectorAll('span.saveSingleSelect[data]')).some(
 							(option) => option.getAttribute('data') === inputs[index].value.trim()
 						)
 				))

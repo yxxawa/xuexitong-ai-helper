@@ -42,7 +42,14 @@ import Typr from 'typr.js';
 import { CommonWorkOptions, playMedia } from '../utils';
 import { waitForElement, waitForMedia } from '../utils/study';
 import { hasAnswerProvider } from '../utils/ai';
-import type { AILineOptionGroup } from '../utils/ai';
+import {
+	getQuestionType,
+	resolveQuestionType,
+	collectLineOptionGroups,
+	lineSelectBoxes,
+	cxQuestionTitles,
+	fillLineAnswer
+} from '../utils/cx-question';
 
 // @ts-ignore
 let top: Window = globalThis.top;
@@ -748,7 +755,7 @@ function describeCXQuestion(ctx: WorkContext<any>, titleTransform: CXTitleTransf
 			  );
 	const lineOptions =
 		type === 'line'
-			? collectLineOptionGroups(elements.lineSelectBox || [], images.imageUrls)
+			? collectLineOptionGroups(ctx.root, images.imageUrls)
 			: type === 'reader' || type === 'fill'
 			? collectGroupedOptions(
 					type === 'reader' ? elements.reading || [] : elements.filling || [],
@@ -773,6 +780,18 @@ function searchCXQuestion(
 				results: [],
 				error: '无法识别本题题型，未发送请求；请手动核对。',
 				data: { skipped: true, reason: 'unknown_question_type' }
+			}
+		];
+	if (
+		question.type === 'line' &&
+		(!question.lineOptions?.length || question.lineOptions.some((group) => !group.options.length))
+	)
+		return [
+			{
+				name: 'AI做题',
+				results: [],
+				error: '已识别连线题，但未能完整读取匹配选项；未发送残缺题目，请等待页面加载后重试。',
+				data: { skipped: true, reason: 'incomplete_line_options' }
 			}
 		];
 	const { title, ...details } = question;
@@ -870,7 +889,10 @@ function workOrExam(
 			.map((element) => (element ? questionElementText(element, imageUrls) : ''))
 			.join(' ')
 			.replace(/^\s*\d+[.、．]\s*/, '')
-			.replace(/^[（(【](?:单选题|多选题|判断题|填空题|简答题|名词解释|阅读理解|完形填空)[^）)】]*[）)】]\s*/, '');
+			.replace(
+				/^[（(【](?:单选题|多选题|判断题|填空题|连线题|匹配题|简答题|名词解释|阅读理解|完形填空)[^）)】]*[）)】]\s*/,
+				''
+			);
 		return removeRedundantWords(title, redundanceWordsText.split('\n')).trim();
 	};
 
@@ -880,18 +902,10 @@ function workOrExam(
 		forceAnswer,
 		root: '.questionLi',
 		elements: {
-			title: [
-				/** 题目标题 */
-				(root) => $el('h3', root) as HTMLElement
-				// /** 连线题第一组 */
-				// (root) => $el('.line_wid_half.fl', root),
-				// /** 连线题第二组 */
-				// (root) => $el('.line_wid_half.fr', root)
-			],
+			title: (root) => cxQuestionTitles(root, 'h3'),
 			options: '.answerBg .answer_p, .textDIV, .eidtDiv',
 			type: type === 'exam' ? 'input[name^="type"]' : 'input[id^="answertype"]',
-			lineAnswerInput: '.line_answer input[name^=answer]',
-			lineSelectBox: '.line_answer_ct .selectBox ',
+			lineSelectBox: (root) => lineSelectBoxes(root),
 			/** 阅读理解 */
 			reading: '.reading_answer',
 			/** 完形填空 */
@@ -910,8 +924,7 @@ function workOrExam(
 
 		work: async (ctx) => {
 			const { elements, searchInfos } = ctx;
-			const typeInput = elements.type[0] as HTMLInputElement;
-			const type = typeInput ? getQuestionType(parseInt(typeInput.value)) : resolveQuestionType(elements, ctx);
+			const type = resolveQuestionType(elements, ctx, elements.title.map((el) => el?.textContent || '').join(' '));
 
 			if (type && (type === 'completion' || type === 'multiple' || type === 'judgement' || type === 'single')) {
 				if (type === 'multiple') clearOtherMultipleOptions(elements.options, searchInfos[0]?.results[0]?.answer || '');
@@ -942,13 +955,7 @@ function workOrExam(
 			else if (type && type === 'line') {
 				for (const info of searchInfos) {
 					for (const result of info.results) {
-						const filled = await fillGroupedChoices(
-							result.answer,
-							elements.lineSelectBox,
-							'li[data]',
-							() => $.sleep(200),
-							ctx.isCancelled
-						);
+						const filled = await fillLineAnswer(result.answer, ctx.root, () => $.sleep(200), ctx.isCancelled);
 						if (filled.finish) return filled;
 					}
 				}
@@ -1993,7 +2000,7 @@ const JobRunner = {
 			const worker = new CourseWorker({
 				root: TiMu,
 				elements: {
-					title: '.Zy_TItle .clearfix',
+					title: (root) => cxQuestionTitles(root, '.Zy_TItle .clearfix'),
 					/**
 					 * 兼容各种选项
 					 *
@@ -2003,8 +2010,7 @@ const JobRunner = {
 					 */
 					options: 'ul li .after,ul li textarea,ul textarea,ul li label:not(.before)',
 					type: 'input[id^="answertype"]',
-					lineAnswerInput: '.line_answer input[name^=answer]',
-					lineSelectBox: '.line_answer_ct .selectBox '
+					lineSelectBox: (root) => lineSelectBoxes(root)
 				},
 				thread: providerConfig.aiProvider === 'deepseek-web' ? 1 : thread ?? 1,
 				requestPeriod: Math.max(0, Number(period || 0) * 1000),
@@ -2016,7 +2022,6 @@ const JobRunner = {
 
 				work: async (ctx) => {
 					const { elements, searchInfos } = ctx;
-					const typeInput = elements.type[0] as HTMLInputElement;
 					const type = resolveQuestionType(elements, ctx, elements.title.map((el) => el?.textContent || '').join(' '));
 
 					if (type && (type === 'completion' || type === 'multiple' || type === 'judgement' || type === 'single')) {
@@ -2053,13 +2058,7 @@ const JobRunner = {
 					else if (type && type === 'line') {
 						for (const info of searchInfos) {
 							for (const result of info.results) {
-								const filled = await fillGroupedChoices(
-									result.answer,
-									elements.lineSelectBox,
-									'li[data]',
-									() => $.sleep(200),
-									ctx.isCancelled
-								);
+								const filled = await fillLineAnswer(result.answer, ctx.root, () => $.sleep(200), ctx.isCancelled);
 								if (filled.finish) return filled;
 							}
 						}
@@ -2242,99 +2241,6 @@ const JobRunner = {
 		await $.sleep(3000);
 	}
 };
-
-/**
- * cx 题目类型 ：
- * 0 单选题
- * 1 多选题
- * 2 简答题
- * 3 判断题
- * 4 填空题
- * 5 名词解释
- * 6 论述题
- * 7 计算题
- * 8 其他题(大概率是填空题)
- * 9 分录题
- * 10 资料题
- * 11 连线题
- * 14 完形填空
- * 15 阅读理解
- */
-function getQuestionType(
-	val: number
-): 'single' | 'multiple' | 'judgement' | 'completion' | 'line' | 'fill' | 'reader' | undefined {
-	return val === 0
-		? 'single'
-		: val === 1
-		? 'multiple'
-		: val === 3
-		? 'judgement'
-		: [2, 4, 5, 6, 7, 8, 9, 10].some((t) => t === val)
-		? 'completion'
-		: val === 11
-		? 'line'
-		: val === 14
-		? 'fill'
-		: val === 15
-		? 'reader'
-		: undefined;
-}
-
-function resolveQuestionType(
-	elements: { type?: HTMLElement[]; options?: HTMLElement[] },
-	ctx?: { type?: ReturnType<typeof getQuestionType>; root?: HTMLElement },
-	title = ''
-): ReturnType<typeof getQuestionType> | undefined {
-	const typeInput = elements.type?.[0] as HTMLInputElement | undefined;
-	const parsed = typeInput ? getQuestionType(parseInt(typeInput.value)) : undefined;
-	if (parsed) {
-		return parsed;
-	}
-
-	if (ctx?.type) {
-		return ctx.type;
-	}
-
-	const titleText = title.toLowerCase();
-	if (/判断题|true or false|对错题|判斷題/.test(titleText)) {
-		return 'judgement';
-	}
-	if (/多选题|多選題|multiple choice/.test(titleText)) {
-		return 'multiple';
-	}
-	if (/单选题|單選題|single choice/.test(titleText)) {
-		return 'single';
-	}
-	if (/填空题|填空題|completion|blank/.test(titleText)) {
-		return 'completion';
-	}
-
-	if (ctx?.root?.querySelector('input[type=checkbox]')) return 'multiple';
-	if (ctx?.root?.querySelector('textarea,[contenteditable=true]')) return 'completion';
-	const options = elements.options || [];
-	const optionText = options.map((option) => option?.innerText?.trim()).filter(Boolean);
-	if (optionText.length === 2 && optionText.every((text) => /^(正确|错误|对|错|√|×|true|false|是|否)$/i.test(text)))
-		return 'judgement';
-	if (ctx?.root?.querySelector('input[type=radio]')) return 'single';
-}
-
-function collectLineOptionGroups(
-	selectBoxes: (HTMLElement | undefined)[] = [],
-	imageUrls: string[] = []
-): AILineOptionGroup[] {
-	return selectBoxes
-		.map((box, index) => {
-			const options = Array.from(box?.querySelectorAll<HTMLElement>('li[data]') || [])
-				.map((item) => {
-					const value = item.getAttribute('data')?.trim() || '';
-					const text = questionElementText(item, imageUrls);
-					return value && text ? { value, text } : undefined;
-				})
-				.filter(Boolean) as { value: string; text: string }[];
-			return { index, options };
-		})
-		.filter((group): group is AILineOptionGroup => Boolean(group));
-}
 
 function isQuestionSkipped(infos: SearchInformation[] | undefined) {
 	return Boolean(infos?.some((info) => (info.data as any)?.skipped === true));

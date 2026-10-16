@@ -1445,7 +1445,7 @@ export async function probeVisionModel(opts: AIAnswererOptions): Promise<string>
 	return info?.error ? '检测未完成：' + info.error : '未能正确识别测试图片，能力仍为未知；请检查接口或手动设置。';
 }
 
-/** Web mode intentionally has no automatic retry or API credential access. */
+/** Web mode uses only native page submission/retry controls and never accesses API credentials. */
 async function queryWebAnswerer(opts: AIAnswererOptions, question: AIQuestionPayload): Promise<SearchInformation[]> {
 	const name = 'DeepSeek 网页（实验）',
 		homepage = 'https://chat.deepseek.com/';

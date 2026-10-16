@@ -1,11 +1,18 @@
 import { assertWebActivity, serviceWebActivities } from './web-activity';
 import { deepSeekAdapter, validateWebImages, type WebChatAdapter, type WebImage } from './deepseek-web';
 
-export const WEB_BRIDGE_STATE = 'xth.web.bridge.v1';
+import {
+	WEB_BRIDGE_STATE,
+	WEB_BRIDGE_MAX_AGE,
+	WEB_BRIDGE_WAKE,
+	WEB_RATE_LIMIT_MAX_WAIT,
+	wakeWebBridge
+} from './web-bridge-state';
+export { WEB_BRIDGE_STATE } from './web-bridge-state';
 const REQUEST_PREFIX = 'xth.web.request.v1.';
 const SESSION_KEY = 'xth.web.dedicated-tab';
 export const WEB_CONVERSATION_LIMIT = 50;
-const HEARTBEAT_AGE = 45000;
+const HEARTBEAT_AGE = WEB_BRIDGE_MAX_AGE;
 const QUEUE_TIMEOUT = 30 * 60 * 1000;
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const uuid = () =>
@@ -27,6 +34,8 @@ interface WebRequest {
 	status: 'queued' | 'processing' | 'done' | 'error' | 'cancelled';
 	createdAt: number;
 	startedAt?: number;
+	deadlineAt?: number;
+	rateLimitRetries?: number;
 	timeout: number;
 	prompt?: string;
 	images?: WebImage[];
@@ -83,6 +92,7 @@ export async function requestWebAnswer(
 			id
 	};
 	GM_setValue(key, request);
+	wakeWebBridge();
 	try {
 		for (;;) {
 			const current = GM_getValue<WebRequest | undefined>(key, undefined);
@@ -95,10 +105,12 @@ export async function requestWebAnswer(
 				throw new Error('专用网页已断开或被暂停；不会自动重发，请检查该标签页。');
 			if (
 				Date.now() - request.createdAt > QUEUE_TIMEOUT ||
-				(current.startedAt && Date.now() - current.startedAt > request.timeout)
+				(current.startedAt && Date.now() > (current.deadlineAt || current.startedAt + request.timeout))
 			) {
 				GM_setValue(key, { ...current, status: 'cancelled', prompt: undefined, images: undefined });
-				throw new Error('网页回答等待超时；请检查登录、验证码、限流或页面兼容性，不会自动重发。');
+				throw new Error(
+					'网页回答等待超时；请检查登录、验证码或页面兼容性。限流会在当前消息上每 3 秒重试，不会重复发送题目。'
+				);
 			}
 			await sleep(350);
 		}
@@ -123,7 +135,7 @@ export function startDeepSeekBridge(adapter: WebChatAdapter = deepSeekAdapter) {
 		host.id = 'xth-deepseek-bridge';
 		const shadow = host.attachShadow({ mode: 'open' });
 		shadow.innerHTML =
-			'<style>:host{color-scheme:light dark;position:fixed;top:12px;right:12px;z-index:2147483647;font:13px/1.6 system-ui;width:min(340px,calc(100vw - 24px));--bg:#fff;--fg:#243247;--border:#cdd7e3;--button:#edf5ff;--accent:#176dcc}@media(prefers-color-scheme:dark){:host{--bg:#171d28;--fg:#e5eaf3;--border:#354258;--button:#203651;--accent:#8bbcff}}section{background:var(--bg);color:var(--fg);padding:14px;border:1px solid var(--border);border-radius:10px;box-shadow:0 4px 18px #0004}p{margin:6px 0}button,a{font:inherit;color:var(--accent);background:var(--button);border:1px solid var(--border);border-radius:6px;padding:6px 10px;cursor:pointer}button:disabled{opacity:.5}nav{display:flex;gap:8px;margin-top:10px}a{text-decoration:none}</style><section><strong>学习通 · DeepSeek 网页桥接（实验）</strong><p>支持题干及选项图片。此标签页会上传图片、发送题目，每个会话最多使用 50 次，并保存在当前账号历史中。启用后请勿在此页手动聊天。</p><p role="status"></p><nav><button type="button">启用此标签页</button><a href="https://chat.deepseek.com/#xth-bridge">空白新对话</a></nav></section>';
+			'<style>:host{color-scheme:light dark;position:fixed;top:12px;right:12px;z-index:2147483647;font:13px/1.6 system-ui;width:min(340px,calc(100vw - 24px));--bg:#fff;--fg:#243247;--border:#cdd7e3;--button:#edf5ff;--accent:#176dcc}@media(prefers-color-scheme:dark){:host{--bg:#171d28;--fg:#e5eaf3;--border:#354258;--button:#203651;--accent:#8bbcff}}section{background:var(--bg);color:var(--fg);padding:14px;border:1px solid var(--border);border-radius:10px;box-shadow:0 4px 18px #0004}p{margin:6px 0}button,a{font:inherit;color:var(--accent);background:var(--button);border:1px solid var(--border);border-radius:6px;padding:6px 10px;cursor:pointer}button:disabled{opacity:.5}nav{display:flex;gap:8px;margin-top:10px}a{text-decoration:none}</style><section><strong>学习通 · DeepSeek 网页桥接（实验）</strong><p>支持题干及选项图片。此标签页会上传图片、发送题目，每个会话最多使用 50 次，并保存在当前账号历史中。遇到请求频率限制会每 3 秒点击当前消息的重试按钮（最多额外等待 10 分钟）。启用后请勿在此页手动聊天。</p><p role="status"></p><nav><button type="button">启用此标签页</button><a href="https://chat.deepseek.com/#xth-bridge">空白新对话</a></nav></section>';
 		document.body.append(host);
 		const status = shadow.querySelector<HTMLElement>('[role="status"]')!;
 		const toggle = shadow.querySelector<HTMLButtonElement>('button')!;
@@ -212,13 +224,37 @@ export function startDeepSeekBridge(adapter: WebChatAdapter = deepSeekAdapter) {
 						throw new Error('专用页对话已改变或上一回答无法确认，请从空白新对话重新启用。');
 				}
 				const startedAt = Date.now();
-				GM_setValue(key, { ...req, status: 'processing', startedAt });
-				await adapter.submit(req.prompt, cancelled, req.images);
+				let deadlineAt = startedAt + req.timeout;
+				GM_setValue(key, { ...req, status: 'processing', startedAt, deadlineAt });
+				await adapter.submit(req.prompt, cancelled, req.images, req.id);
+				if (cancelled()) throw new Error('请求已取消，已停止重试。');
+				// The page owns the sent message now. Do not retain base64 images in every progress update.
+				GM_setValue(key, { ...req, status: 'processing', startedAt, deadlineAt, prompt: undefined, images: undefined });
 				conversationUses++;
 				let previous = '',
-					stableAt = 0;
-				while (!cancelled() && Date.now() - startedAt < req.timeout) {
+					stableAt = 0,
+					limitedAt = 0,
+					rateLimitRetries = 0;
+				while (!cancelled() && Date.now() < deadlineAt) {
 					const answer = adapter.readCompleted(req.id);
+					const recovery = answer ? undefined : adapter.retryRateLimited?.(req.id, cancelled);
+					if (recovery) {
+						const now = Date.now();
+						// Reserve the bounded retry budget immediately. Extending by tiny timer deltas
+						// makes foreground callers time out if this receiver is background-throttled.
+						const extendedDeadline = startedAt + req.timeout + WEB_RATE_LIMIT_MAX_WAIT;
+						if (deadlineAt !== extendedDeadline || rateLimitRetries !== recovery.attempts) {
+							deadlineAt = extendedDeadline;
+							rateLimitRetries = recovery.attempts;
+							const current = GM_getValue<WebRequest | undefined>(key, undefined);
+							if (current?.status === 'processing') GM_setValue(key, { ...current, deadlineAt, rateLimitRetries });
+						}
+						limitedAt = now;
+						say('DeepSeek 请求频率受限 · 每 3 秒重试当前消息 · 已重试 ' + rateLimitRetries + ' 次；可随时停止。');
+					} else if (limitedAt) {
+						limitedAt = 0;
+						say('限流提示已消失，正在等待当前回答完成…');
+					}
 					if (answer && answer === previous && Date.now() - stableAt >= 1200) {
 						GM_setValue(key, { ...req, status: 'done', startedAt, prompt: undefined, images: undefined, answer });
 						activeKey = '';
@@ -242,7 +278,13 @@ export function startDeepSeekBridge(adapter: WebChatAdapter = deepSeekAdapter) {
 					}
 					await sleep(300);
 				}
-				throw new Error('请求取消或回答超时。请检查登录、验证码、限流或网页结构；不会自动重发。');
+				throw new Error(
+					cancelled()
+						? '请求已取消，已停止重试。'
+						: limitedAt
+						? '限流等待已达上限；请稍后检查专用页，不会重新发送题目。'
+						: '回答超时。请检查登录、验证码或网页结构；不会重新发送题目。'
+				);
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				failPending(message);
@@ -324,13 +366,27 @@ export function startDeepSeekBridge(adapter: WebChatAdapter = deepSeekAdapter) {
 				})();
 			}
 		} else say('未启用。请先登录并打开空白新对话。');
-		heartbeat = setInterval(() => {
-			if (enabled && ownsLease()) {
-				publish(resetting ? 'reloading' : busy ? 'busy' : 'ready');
-				serviceWebActivities(owner, busy);
+		const tick = () => {
+			try {
+				if (enabled && ownsLease()) {
+					publish(resetting ? 'reloading' : busy ? 'busy' : 'ready');
+					serviceWebActivities(owner, busy);
+				}
+				void consume().catch((error) => stop(String(error)));
+			} catch (error) {
+				failPending(String(error));
+				stop(String(error));
 			}
-			void consume().catch((error) => stop(String(error)));
-		}, 1000);
+		};
+		heartbeat = setInterval(tick, 1000);
+		// Storage events wake a background receiver without waiting for a throttled interval.
+		const wakeListener =
+			typeof GM_addValueChangeListener === 'function'
+				? GM_addValueChangeListener(WEB_BRIDGE_WAKE, () => tick())
+				: undefined;
+		document.addEventListener('visibilitychange', tick);
+		window.addEventListener('pageshow', tick);
+
 		document.addEventListener(
 			'input',
 			(event) => {
@@ -345,6 +401,10 @@ export function startDeepSeekBridge(adapter: WebChatAdapter = deepSeekAdapter) {
 			'pagehide',
 			() => {
 				clearInterval(heartbeat);
+				document.removeEventListener('visibilitychange', tick);
+				window.removeEventListener('pageshow', tick);
+				if (wakeListener !== undefined && typeof GM_removeValueChangeListener === 'function')
+					GM_removeValueChangeListener(wakeListener);
 				if (activeKey) {
 					failPending('网页离开或刷新，已停止本次请求。');
 					stop('页面已离开。');

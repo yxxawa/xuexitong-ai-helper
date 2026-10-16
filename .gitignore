@@ -25,3 +25,7 @@ Thumbs.db
 # This repository uses pnpm only
 package-lock.json
 yarn.lock
+
+# Local browser verification artifacts (may include account page snapshots)
+.playwright-cli/
+output/playwright/

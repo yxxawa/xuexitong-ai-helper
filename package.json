@@ -1,12 +1,13 @@
 {
 	"name": "xuexitong-ai-helper",
-	"version": "1.0.2",
+	"version": "1.0.4",
 	"description": "学习通 AI 辅助插件，支持自定义 AI 接口、自动答题、手动搜题和章节学习。",
 	"scripts": {
 		"dev": "gulp -f ./scripts/dev-core.js",
 		"build": "gulp -f ./scripts/build-core.js",
-		"typecheck": "pnpm --filter @xuexitong-ai-helper/utils exec tsc --noEmit && pnpm --filter @xuexitong-ai-helper/core exec tsc --noEmit && pnpm --filter @xuexitong-ai-helper/scripts exec tsc --noEmit",
-		"tsc": "gulp -f ./scripts/tsc.js"
+		"typecheck": "tsc --noEmit -p packages/utils/tsconfig.json && tsc --noEmit -p packages/core/tsconfig.json && tsc --noEmit -p packages/scripts/tsconfig.json",
+		"tsc": "gulp -f ./scripts/tsc.js",
+		"test": "node --test tests/*.test.cjs"
 	},
 	"devDependencies": {
 		"@html-eslint/eslint-plugin": "^0.15.0",

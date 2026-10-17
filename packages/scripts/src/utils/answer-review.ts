@@ -43,9 +43,9 @@ export class AnswerReview {
 	budget(action: ReviewAction) {
 		if (action !== 'check') return 2 * 60 * 1000;
 		const opts = this.target.options();
-		// Web mailboxes allow 30 minutes including queueing, plus image loading/activity setup.
+		// Include connection/lease waiting, the mailbox queue and bounded recovery, plus setup.
 		return opts.aiProvider === 'deepseek-web'
-			? 32 * 60 * 1000
+			? 122 * 60 * 1000
 			: 2 * Math.max(5, Math.min(600, Number(opts.aiAnswerTimeout) || 120)) * 1000 + 2 * 60 * 1000;
 	}
 	private snapshot() {
@@ -77,7 +77,7 @@ export class AnswerReview {
 			const opts = action === 'accept' ? this.proposal?.opts : this.target.options();
 			if (!opts) throw new Error('建议已失效，请重新检验。');
 			this.target.available();
-			if (opts.aiProvider === 'deepseek-web') lease = await acquireWebActivity('search');
+			if (opts.aiProvider === 'deepseek-web') lease = await acquireWebActivity('search', control);
 			assertActive();
 			if (action === 'check') {
 				this.proposal = undefined;

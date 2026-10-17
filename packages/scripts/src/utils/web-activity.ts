@@ -1,4 +1,6 @@
-import { WEB_BRIDGE_STATE, WEB_BRIDGE_MAX_AGE, wakeWebBridge } from './web-bridge-state';
+import { WEB_BRIDGE_STATE, WEB_BRIDGE_MAX_AGE, WEB_BRIDGE_RECOVERY_TIMEOUT, wakeWebBridge } from './web-bridge-state';
+import { waitForAI, type AIRequestControl } from './request-control';
+import { reportWebTaskStatus, waitForWebBridge } from './web-task';
 
 /** One enabled receiver arbitrates work/search leases across all learning tabs and iframes. */
 export type WebActivityKind = 'work' | 'search';
@@ -36,7 +38,7 @@ export function getWebActivity(): WebActivity | undefined {
 		if (
 			request?.status === 'granted' &&
 			request.bridgeId === state.bridgeId &&
-			Date.now() - request.updatedAt < MAX_AGE
+			Date.now() - request.updatedAt < WEB_BRIDGE_RECOVERY_TIMEOUT
 		)
 			return state;
 	} catch {
@@ -58,7 +60,10 @@ export function serviceWebActivities(bridgeId: string, requestInFlight = false):
 	const pending: ActivityRequest[] = [];
 	for (const key of GM_listValues().filter((key) => key.startsWith(PREFIX))) {
 		const request = GM_getValue<ActivityRequest | undefined>(key, undefined);
-		if (!request || Date.now() - request.updatedAt > MAX_AGE) {
+		if (
+			!request ||
+			Date.now() - request.updatedAt > (request.status === 'granted' ? WEB_BRIDGE_RECOVERY_TIMEOUT : MAX_AGE)
+		) {
 			GM_deleteValue(key);
 			continue;
 		}
@@ -79,7 +84,45 @@ export function serviceWebActivities(bridgeId: string, requestInFlight = false):
 	}
 	if (!active) GM_deleteValue(WEB_ACTIVITY_STATE);
 }
-export async function acquireWebActivity(kind: WebActivityKind): Promise<WebActivityLease> {
+async function waitForActivityGrant(key: string, bridgeId: string, control: AIRequestControl) {
+	// The owner may pause while waiting for a background receiver to grant the lease.
+	const keepAlive = setInterval(() => {
+		const current = GM_getValue<ActivityRequest | undefined>(key, undefined);
+		if (current?.bridgeId === bridgeId && current.status !== 'rejected' && !control.isCancelled?.())
+			GM_setValue(key, { ...current, updatedAt: Date.now() });
+	}, 5000);
+	try {
+		let startedAt = Date.now(),
+			lastWake = Date.now();
+		while (Date.now() - startedAt < WEB_BRIDGE_RECOVERY_TIMEOUT) {
+			const pausedAt = Date.now();
+			await waitForAI(control);
+			startedAt += Date.now() - pausedAt;
+			const state = GM_getValue<ActivityRequest | undefined>(key, undefined);
+			const currentBridge = GM_getValue<{ id: string; status: string } | undefined>(BRIDGE, undefined);
+			if (!state || currentBridge?.status === 'disabled' || (currentBridge && currentBridge.id !== bridgeId))
+				throw new Error('网页任务连接已停止或更换，未发送题目。');
+			if (state.status === 'rejected') throw new Error(state.error || '网页正在处理另一项任务。');
+			if (state.status === 'granted' && getWebActivity()?.id === state.id) return;
+			if (Date.now() - lastWake >= 3000) {
+				lastWake = Date.now();
+				GM_setValue(key, { ...state, updatedAt: Date.now() });
+				wakeWebBridge();
+			}
+			if (Date.now() - startedAt > 15000)
+				reportWebTaskStatus('waiting', '等待 DeepSeek 专用页确认任务，恢复响应后自动开始；可随时停止。');
+			await sleep(100);
+		}
+		throw new Error('专用网页超过 30 分钟未确认任务，请检查登录、验证码或休眠后重新开始。');
+	} finally {
+		clearInterval(keepAlive);
+	}
+}
+export async function acquireWebActivity(
+	kind: WebActivityKind,
+	control: AIRequestControl = {}
+): Promise<WebActivityLease> {
+	await waitForWebBridge(control);
 	const bridge = receiver();
 	if (!bridge) throw new Error('DeepSeek 网页未连接，请先启用专用标签页。');
 	if (!bridge.supportsActivities) throw new Error('请刷新 DeepSeek 专用标签页并重新启用，以使用新版任务互斥。');
@@ -100,30 +143,25 @@ export async function acquireWebActivity(kind: WebActivityKind): Promise<WebActi
 	GM_setValue(key, request);
 	wakeWebBridge();
 	try {
-		while (Date.now() - request.createdAt < 15000) {
-			const state = GM_getValue<ActivityRequest | undefined>(key, undefined);
-			if (!state || receiver()?.id !== bridge.id) throw new Error('网页任务连接已中断，未发送题目。');
-			if (state.status === 'rejected') throw new Error(state.error || '网页正在处理另一项任务。');
-			if (state.status === 'granted' && getWebActivity()?.id === id) {
-				let released = false;
-				const renew = setInterval(() => {
-					const current = GM_getValue<ActivityRequest | undefined>(key, undefined);
-					if (current?.status === 'granted' && getWebActivity()?.id === id)
-						GM_setValue(key, { ...current, updatedAt: Date.now() });
-				}, 5000);
-				const release = () => {
-					if (released) return;
-					released = true;
-					clearInterval(renew);
-					GM_deleteValue(key);
-					if (typeof window !== 'undefined') window.removeEventListener('pagehide', release);
-				};
-				if (typeof window !== 'undefined') window.addEventListener('pagehide', release, { once: true });
-				return { id, bridgeId: bridge.id, kind, assertActive: () => assertWebActivity(id), release };
-			}
-			await sleep(100);
-		}
-		throw new Error('专用网页未及时响应任务占用，请保持标签页运行后重试。');
+		await waitForActivityGrant(key, bridge.id, control);
+		let released = false;
+		const renew = setInterval(() => {
+			const current = GM_getValue<ActivityRequest | undefined>(key, undefined);
+			if (
+				current?.status === 'granted' &&
+				GM_getValue<WebActivity | undefined>(WEB_ACTIVITY_STATE, undefined)?.id === id
+			)
+				GM_setValue(key, { ...current, updatedAt: Date.now() });
+		}, 5000);
+		const release = () => {
+			if (released) return;
+			released = true;
+			clearInterval(renew);
+			GM_deleteValue(key);
+			if (typeof window !== 'undefined') window.removeEventListener('pagehide', release);
+		};
+		if (typeof window !== 'undefined') window.addEventListener('pagehide', release, { once: true });
+		return { id, bridgeId: bridge.id, kind, assertActive: () => assertWebActivity(id), release };
 	} catch (error) {
 		GM_deleteValue(key);
 		throw error;
@@ -142,4 +180,22 @@ export function watchWebActivity(element: HTMLElement, update: () => void) {
 		update();
 	}, 300);
 	update();
+}
+
+/** Reconfirm an existing task after its receiver reloads; only the receiver can grant it. */
+export async function ensureWebActivity(id: string | undefined, control: AIRequestControl = {}) {
+	const bridge = await waitForWebBridge(control);
+	if (!id) {
+		assertWebActivity();
+		return;
+	}
+	const key = PREFIX + id;
+	const request = GM_getValue<ActivityRequest | undefined>(key, undefined);
+	if (!request) throw new Error('网页任务占用已失效，请停止后补全未完成。');
+	if (getWebActivity()?.id === id) return;
+	const active = getWebActivity();
+	if (active) throw new Error(webActivityMessage(active));
+	GM_setValue(key, { ...request, bridgeId: bridge.id, status: 'pending', updatedAt: Date.now() });
+	wakeWebBridge();
+	await waitForActivityGrant(key, bridge.id, control);
 }

@@ -1,6 +1,7 @@
 import { waitForAI, type AIRequestControl } from './request-control';
 import { parseJSONLike, AI_JSON_ESCAPE_HINT } from './answer-json';
 import { getWebBridgeState, requestWebAnswer } from './web-ai';
+import { reportWebTaskStatus } from './web-task';
 import {
 	getVisionCapability,
 	rememberVisionCapability,
@@ -1553,6 +1554,7 @@ async function queryWebAnswerer(
 			}
 		];
 	} catch (error) {
+		if (!control.isCancelled?.()) reportWebTaskStatus('attention', normalizeErrorMessage(error));
 		return [{ name, homepage, results: [], error: normalizeErrorMessage(error), data: { provider: 'deepseek-web' } }];
 	}
 }

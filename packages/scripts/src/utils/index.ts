@@ -43,7 +43,7 @@ export function workPreCheckMessage(
 ) {
 	const { onrun, onNoAIConfig, onclose, ...opts } = options;
 
-	if (hasAnswerProvider(opts) === false) {
+	if (hasAnswerProvider(opts) === false && opts.aiProvider !== 'deepseek-web') {
 		onNoAIConfig?.(opts);
 		return aiConfigEmptyWarning(0);
 	} else {

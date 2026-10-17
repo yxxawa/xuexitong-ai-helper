@@ -12,6 +12,7 @@ async function setup(t,options={}) {
   const calls=[],answers=new Map();let resets=0;
   const adapter={
     id:'deepseek-web',supportsImages:true,assertEmpty(){},assertReady(){},
+    resume(id){return calls.some(call=>call.id===id);},
     async submit(prompt,cancelled,images,id){
       const call={prompt,id,at:clock.now};calls.push(call);
       if(options.onSubmit)await options.onSubmit({clock,mem,call,cancelled});
@@ -180,8 +181,8 @@ test('repeated cached page restores reinstall bridge heartbeat and storage wakeu
   const e=await setup(t);
   for(let i=0;i<2;i++) {
     for(const name of ['pagehide','pageshow']) {const event=new e.window.Event(name);Object.defineProperty(event,'persisted',{value:true});e.window.dispatchEvent(event);}
-    assert.equal(e.bridge.getWebBridgeState(),undefined);
-    e.toggle.click();await e.clock.advance(150);const updated=e.bridge.getWebBridgeState().updatedAt;
+    assert.equal(e.bridge.getWebBridgeState().status,'ready');
+    await e.clock.advance(150);const updated=e.bridge.getWebBridgeState().updatedAt;
     await e.clock.advance(181000);assert.ok(e.bridge.getWebBridgeState().updatedAt>updated);
     const task=capture(e.bridge.requestWebAnswer('restored '+i,30));await e.clock.advance(2000);
     assert.equal(task.done,true);assert.equal(task.error,undefined);
@@ -194,4 +195,170 @@ test('a task requiring pause support asks to refresh an older receiver before se
   delete state.supportsPause;e.mem.globals.GM_setValue(STATE,state);
   await assert.rejects(e.bridge.requestWebAnswer('old receiver',30,[],undefined,{isPaused:()=>false}),/刷新/);
   assert.equal(e.calls.length,0);assert.equal([...e.mem.values.keys()].filter(key=>key.startsWith(PREFIX)).length,0);
+});
+
+// A temporary receiver outage must keep the original request, activity, and nonce.
+test('a four-minute receiver suspension resumes the original question and then accepts the next one',async t=>{
+  const e=await setup(t,{delay:240000});
+  const task=capture(e.bridge.requestWebAnswer('suspend this question',30));
+  await e.clock.advance(2000);
+  const before=[...e.mem.values.entries()].find(([key])=>key.startsWith(PREFIX));
+  e.window.dispatchEvent(new e.window.Event('pagehide'));
+  await e.clock.advance(240000);
+  assert.equal(task.done,false);assert.equal(e.calls.length,1);
+  assert.ok(e.mem.values.has(before[0]));
+  e.window.dispatchEvent(new e.window.Event('pageshow'));
+  await e.clock.advance(2500);
+  assert.equal(task.done,true);assert.equal(task.error,undefined);assert.equal(e.calls.length,1);
+  const second=capture(e.bridge.requestWebAnswer('next question',300));
+  await e.clock.advance(242000);
+  assert.equal(second.done,true);assert.equal(second.error,undefined);assert.equal(e.calls.length,2);
+});
+test('cancelling while disconnected removes the original mailbox and prevents continuation on return',async t=>{
+  const e=await setup(t,{delay:240000});let cancelled=false;
+  const task=capture(e.bridge.requestWebAnswer('cancel while offline',30,[],undefined,{isCancelled:()=>cancelled}));
+  await e.clock.advance(1000);e.window.dispatchEvent(new e.window.Event('pagehide'));
+  await e.clock.advance(4000);cancelled=true;await e.clock.advance(1000);
+  assert.equal(task.done,true);assert.match(task.error.message,/取消/);
+  e.window.dispatchEvent(new e.window.Event('pageshow'));await e.clock.advance(3000);
+  assert.equal(e.calls.length,1);assert.equal([...e.mem.values.keys()].filter(key=>key.startsWith(PREFIX)).length,0);
+});
+test('disconnection recovery has a thirty-minute ceiling and leaves an actionable status',async t=>{
+  const e=await setup(t,{delay:3000000});
+  const task=capture(e.bridge.requestWebAnswer('long outage',30));await e.clock.advance(1000);
+  e.window.dispatchEvent(new e.window.Event('pagehide'));
+  await e.clock.advance(1802000);
+  assert.equal(task.done,true);assert.match(task.error.message,/30 分钟/);assert.equal(e.calls.length,1);
+  assert.equal([...e.mem.values.keys()].filter(key=>key.startsWith(PREFIX)).length,0);
+});
+test('an explicitly stopped bridge never silently reconnects when its page returns',async t=>{
+  const e=await setup(t);e.toggle.click();await e.clock.advance(500);
+  e.window.dispatchEvent(new e.window.Event('pagehide'));
+  e.window.dispatchEvent(new e.window.Event('pageshow'));await e.clock.advance(2000);
+  assert.equal(e.bridge.getWebBridgeState(),undefined);assert.equal(e.calls.length,0);
+});
+test('reload reattaches to the original nonce without submitting the prompt again',async t=>{
+  const e=await setup(t,{rateLimit:true,delay:18000});
+  const task=capture(e.bridge.requestWebAnswer('refresh in flight',30));await e.clock.advance(3000);
+  const owner=e.bridge.getWebBridgeState().id;
+  e.window.dispatchEvent(new e.window.Event('pagehide'));
+  const fresh=domRuntime();t.after(()=>fresh.window.close());
+  for(let i=0;i<e.window.sessionStorage.length;i++){
+    const key=e.window.sessionStorage.key(i);fresh.window.sessionStorage.setItem(key,e.window.sessionStorage.getItem(key));
+  }
+  const next=loadTS(ENTRY,{...fresh.globals,...e.clock.globals(),...e.mem.globals});
+  let resumed=0;const adapter={...e.adapter,resume(id){resumed++;return e.calls.some(call=>call.id===id);}};
+  next.startDeepSeekBridge(adapter);fresh.document.dispatchEvent(new fresh.window.Event('DOMContentLoaded'));
+  await e.clock.advance(19000);
+  assert.equal(task.done,true);assert.equal(task.error,undefined);assert.ok(resumed>=1);
+  assert.equal(e.calls.length,1);assert.equal(next.getWebBridgeState().id,owner);
+  assert.equal(next.getWebBridgeState().status,'ready');
+  const follow=capture(next.requestWebAnswer('after refresh',30));await e.clock.advance(20500);
+  assert.equal(follow.done,true);assert.equal(follow.error,undefined);assert.equal(e.calls.length,2);
+});
+test('receiver reload before submission confirmation never calls submit a second time',async t=>{
+  const e=await setup(t,{onSubmit:async({clock})=>new Promise(resolve=>clock.setTimeout(resolve,8000))});
+  const task=capture(e.bridge.requestWebAnswer('uncertain send',30));await e.clock.advance(500);
+  e.window.dispatchEvent(new e.window.Event('pagehide'));
+  const fresh=domRuntime();t.after(()=>fresh.window.close());
+  for(let i=0;i<e.window.sessionStorage.length;i++){
+    const key=e.window.sessionStorage.key(i);fresh.window.sessionStorage.setItem(key,e.window.sessionStorage.getItem(key));
+  }
+  const next=loadTS(ENTRY,{...fresh.globals,...e.clock.globals(),...e.mem.globals});
+  next.startDeepSeekBridge(e.adapter);fresh.document.dispatchEvent(new fresh.window.Event('DOMContentLoaded'));
+  await e.clock.advance(12000);
+  assert.equal(task.done,true);assert.equal(task.error,undefined);assert.equal(e.calls.length,1);
+});
+test('activity ownership survives a receiver heartbeat outage and still rejects concurrent work',async t=>{
+  const e=await setup(t);
+  const learning=domRuntime('', 'https://mooc1.chaoxing.com/mooc2/work/dowork');t.after(()=>learning.window.close());
+  const activities=loadTS('packages/scripts/src/utils/web-activity.ts',{...learning.globals,...e.clock.globals(),...e.mem.globals});
+  const acquired=capture(activities.acquireWebActivity('work'));await e.clock.advance(200);
+  const lease=acquired.value;assert.ok(lease);
+  e.window.dispatchEvent(new e.window.Event('pagehide'));await e.clock.advance(245000);
+  e.window.dispatchEvent(new e.window.Event('pageshow'));await e.clock.advance(1500);
+  assert.equal(activities.getWebActivity().id,lease.id);lease.assertActive();
+  await assert.rejects(activities.acquireWebActivity('search'),/正在自动答题/);lease.release();
+});
+
+test('a long user pause during disconnection does not consume the recovery budget twice',async t=>{
+  const e=await setup(t,{delay:3000000});let paused=false;
+  const task=capture(e.bridge.requestWebAnswer('paused offline',30,[],undefined,{isPaused:()=>paused}));
+  await e.clock.advance(1000);e.window.dispatchEvent(new e.window.Event('pagehide'));
+  await e.clock.advance(2000);paused=true;await e.clock.advance(1900000);
+  assert.equal(task.done,false);paused=false;await e.clock.advance(1000);assert.equal(task.done,false);
+  // The virtual service already completed this original nonce during the pause.
+  e.adapter.readCompleted=id=>JSON.stringify({_bridge_id:id,answer:'A',answers:['A'],solution:''});
+  e.window.dispatchEvent(new e.window.Event('pageshow'));await e.clock.advance(2000);
+  assert.equal(task.done,true);assert.equal(task.error,undefined);assert.equal(e.calls.length,1);
+});
+test('old receivers are rejected before any question is queued for recovery-aware tasks',async t=>{
+  const e=await setup(t);const state=e.mem.globals.GM_getValue(STATE);delete state.supportsRecovery;
+  e.mem.globals.GM_setValue(STATE,state);
+  await assert.rejects(e.bridge.requestWebAnswer('old bridge',30),/刷新/);
+  assert.equal(e.calls.length,0);assert.equal([...e.mem.values.keys()].filter(key=>key.startsWith(PREFIX)).length,0);
+});
+test('eight virtual hours keep completing new questions across connection gaps and the fiftieth-turn rotation',async t=>{
+  const e=await setup(t,{delay:1000});const start=e.clock.now;
+  let receiverWindow=e.window, receiverBridge=e.bridge, rotations=0;
+  for(let i=0;i<80;i++) {
+    const slot=e.clock.now;
+    const task=capture(e.bridge.requestWebAnswer('overnight '+i,30));await e.clock.advance(400);
+    if(i===19||i===59){
+      receiverWindow.dispatchEvent(new receiverWindow.Event('pagehide'));await e.clock.advance(300000);
+      assert.equal(task.done,false);receiverWindow.dispatchEvent(new receiverWindow.Event('pageshow'));
+    }
+    await e.clock.advance(2300);
+    assert.equal(task.done,true,'question '+i);assert.equal(task.error,undefined,'question '+i);
+    assert.equal(e.calls.length,i+1,'exactly one native submission per question');
+    if(receiverBridge.getWebBridgeState().status==='reloading'){
+      rotations++;receiverWindow.dispatchEvent(new receiverWindow.Event('pagehide'));
+      const fresh=domRuntime();t.after(()=>fresh.window.close());
+      for(let j=0;j<receiverWindow.sessionStorage.length;j++){
+        const key=receiverWindow.sessionStorage.key(j);fresh.window.sessionStorage.setItem(key,receiverWindow.sessionStorage.getItem(key));
+      }
+      receiverBridge=loadTS(ENTRY,{...fresh.globals,...e.clock.globals(),...e.mem.globals});
+      receiverBridge.startDeepSeekBridge(e.adapter);fresh.document.dispatchEvent(new fresh.window.Event('DOMContentLoaded'));
+      receiverWindow=fresh.window;await e.clock.advance(200);
+    }
+    await e.clock.advance(360000-(e.clock.now-slot));
+    assert.equal(receiverBridge.getWebBridgeState().status,'ready');
+  }
+  assert.equal(e.clock.now-start,8*60*60*1000);assert.equal(e.calls.length,80);
+  assert.equal(e.resets,1);assert.equal(rotations,1);
+  assert.equal([...e.mem.values.keys()].filter(key=>key.startsWith(PREFIX)).length,0);
+});
+
+test('a background-delayed activity grant can recover after the old fifteen-second handshake deadline',async()=>{
+  const clock=new Clock(),mem=storage();
+  const activities=loadTS('packages/scripts/src/utils/web-activity.ts',{...clock.globals(),...mem.globals});
+  mem.values.set(STATE,{id:'delayed-receiver',provider:'deepseek-web',instance:'receiver',status:'ready',updatedAt:clock.now,supportsActivities:true});
+  const task=capture(activities.acquireWebActivity('work'));await clock.advance(20000);
+  assert.equal(task.done,false);assert.equal([...mem.values.keys()].filter(key=>key.startsWith('xth.web.activity.request.v1.')).length,1);
+  activities.serviceWebActivities('delayed-receiver');await clock.advance(200);
+  assert.equal(task.done,true);assert.equal(task.error,undefined);task.value.release();
+});
+
+test('restoring an existing task uses the same delayed-grant recovery as the initial acquisition',async()=>{
+  const clock=new Clock(),mem=storage();
+  const activities=loadTS('packages/scripts/src/utils/web-activity.ts',{...clock.globals(),...mem.globals});
+  mem.values.set(STATE,{id:'new-receiver',provider:'deepseek-web',instance:'receiver',status:'ready',updatedAt:clock.now,supportsActivities:true});
+  mem.values.set('xth.web.activity.request.v1.task',{id:'task',bridgeId:'old-receiver',kind:'work',status:'granted',createdAt:clock.now,updatedAt:clock.now});
+  const task=capture(activities.ensureWebActivity('task'));await clock.advance(20000);
+  assert.equal(task.done,false);activities.serviceWebActivities('new-receiver');await clock.advance(200);
+  assert.equal(task.done,true);assert.equal(task.error,undefined);activities.assertWebActivity('task');
+});
+
+test('pausing a delayed task grant for thirty-one minutes keeps ownership without starting work or leaking a renewal timer',async()=>{
+  const clock=new Clock(),mem=storage();let paused=false;
+  const activities=loadTS('packages/scripts/src/utils/web-activity.ts',{...clock.globals(),...mem.globals});
+  const receiver={id:'paused-receiver',provider:'deepseek-web',instance:'receiver',status:'ready',updatedAt:clock.now,supportsActivities:true};
+  mem.values.set(STATE,receiver);
+  const task=capture(activities.acquireWebActivity('work',{isPaused:()=>paused}));await clock.advance(200);
+  paused=true;
+  const receiverTimer=clock.setInterval(()=>{mem.values.set(STATE,{...receiver,updatedAt:clock.now});activities.serviceWebActivities(receiver.id);},1000);
+  await clock.advance(31*60*1000);assert.equal(task.done,false);assert.ok(activities.getWebActivity());
+  paused=false;await clock.advance(200);assert.equal(task.done,true);assert.equal(task.error,undefined);
+  task.value.release();clock.clearInterval(receiverTimer);await clock.advance(300);
+  assert.equal(clock.timers.size,0);assert.equal(activities.getWebActivity(),undefined);
 });

@@ -35,6 +35,8 @@ export interface WebChatAdapter {
 	supportsImages?: boolean;
 	assertEmpty(): void;
 	assertReady(): void;
+	/** Reattach to an existing native message; never fills the composer or clicks send. */
+	resume?(requestId: string, attempts?: number): boolean;
 	submit(prompt: string, cancelled: () => boolean, images?: WebImage[], requestId?: string): Promise<void>;
 	retryRateLimited?(requestId: string, cancelled: () => boolean): WebRateLimitRecovery | undefined;
 	readCompleted(requestId: string): string | undefined;
@@ -226,6 +228,13 @@ export function createDeepSeekAdapter(): WebChatAdapter {
 				Array.from(document.querySelectorAll<HTMLInputElement>('input[type="file"]')).some((el) => el.files?.length)
 			)
 				throw new Error('输入框有已有输入、附件或聊天仍在生成，已停止以避免混入其他内容。');
+		},
+		resume(requestId, attempts = 0) {
+			const users = Array.from(document.querySelectorAll<HTMLElement>(USERS));
+			const user = users[users.length - 1];
+			if (!requestId || (user && !user.textContent?.includes(requestId)) || (!user && !this.readCompleted(requestId))) return false;
+			active = { id: requestId, baseline: new Set(), attempts, nextRetryAt: Date.now() + WEB_RATE_LIMIT_RETRY_MS };
+			return true;
 		},
 		async submit(prompt, cancelled, images = [], requestId = '') {
 			this.assertReady();

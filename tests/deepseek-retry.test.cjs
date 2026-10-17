@@ -136,3 +136,20 @@ test('native image validation limits and unique attachment names remain enforced
   assert.throws(()=>api.validateWebImages(Array.from({length:11},()=>image)),/10 张/);
   assert.throws(()=>api.validateWebImages([{name:'bad.svg',dataUrl:'data:image/svg+xml;base64,AA=='}]),/格式/);
 });
+
+test('a fresh adapter reattaches to the original limited message and preserves the retry spacing without sending',async t=>{
+  const e=setup(t);await e.submit();
+  const resumed=e.api.createDeepSeekAdapter();
+  assert.equal(resumed.resume(ID,4),true);
+  assert.equal(resumed.retryRateLimited(ID,()=>false).attempts,4);
+  await e.clock.advance(2999);resumed.retryRateLimited(ID,()=>false);assert.equal(e.retries,0);
+  await e.clock.advance(1);assert.equal(resumed.retryRateLimited(ID,()=>false).attempts,5);
+  assert.equal(e.retries,1);assert.equal(e.sent,1);
+});
+test('resuming never adopts a different latest user message or creates a missing original message',async t=>{
+  const e=setup(t);const resumed=e.api.createDeepSeekAdapter();
+  assert.equal(resumed.resume(ID),false);assert.equal(e.sent,0);
+  e.addPending('some-other-message');assert.equal(resumed.resume(ID),false);
+  await e.clock.advance(6000);assert.equal(resumed.retryRateLimited(ID,()=>false),undefined);
+  assert.equal(e.retries,0);assert.equal(e.sent,0);
+});

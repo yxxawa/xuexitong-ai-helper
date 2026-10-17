@@ -12,6 +12,14 @@ import { $ui, $message, MessageElement, Script, h, CommonEventEmitter, cors } fr
 import { CommonProject } from '../projects/common';
 import { CommonWorkOptions, workPreCheckMessage } from '.';
 import { hasAnswerProvider } from './ai';
+import { waitForAI } from './request-control';
+import {
+	createWebTaskStatus,
+	reportWebTaskStatus,
+	waitForWebBridge,
+	watchWebTaskStatus,
+	type WebTaskStatus
+} from './web-task';
 
 export let globalControlPanel: HTMLElement | null = null;
 
@@ -44,7 +52,8 @@ export function commonWork(
 	 * 是否正在运行
 	 */
 	let running = false;
-	let starting = false;
+	let startTask: Promise<void> | undefined;
+	let cancelStartup: (() => void) | undefined;
 	let activity: WebActivityLease | undefined;
 	globalControlPanel = null;
 
@@ -53,6 +62,7 @@ export function commonWork(
 		const { completeBtn, controlBtn, restartBtn, startBtn, stopBtn } = createWorkerControl({
 			workerProvider: () => worker,
 			activityId: () => activity?.id,
+			canRestart: () => !startTask,
 			onStart: async () => {
 				startBtnPressed = true;
 				if (checkMessage instanceof MessageElement) {
@@ -62,21 +72,27 @@ export function commonWork(
 				return start();
 			},
 			onStop: async () => {
-				if (starting) return;
-				starting = true;
+				cancelStartup?.();
 				try {
 					worker?.emit('close');
+					await startTask?.catch(() => undefined);
 					await (worker as any)?.waitForIdle?.();
+				} finally {
 					running = false;
 					activity?.release();
 					activity = undefined;
+					reportWebTaskStatus('idle', '任务已停止。');
 					renderPanels.forEach((render) => render());
-				} finally {
-					starting = false;
 				}
 			},
-			onRestart: () => start(undefined, true),
-			onCompleteUnfinished: () => start(undefined, true, true)
+			onRestart: () => {
+				startBtnPressed = true;
+				return start(undefined, true);
+			},
+			onCompleteUnfinished: () => {
+				startBtnPressed = true;
+				return start(undefined, true, true);
+			}
 		});
 
 		startBtn.style.flex = '1';
@@ -130,6 +146,7 @@ export function commonWork(
 				h('div', { style: { marginTop: '12px' } }, [
 					gotoSettingsBtnContainer,
 					...(options.enable_control_panel ? [createWorkControlPanel().container] : []),
+					...(CommonProject.scripts.settings.cfg.aiProvider === 'deepseek-web' ? [createWebTaskStatus()] : []),
 					workResultPanel()
 				])
 			);
@@ -145,7 +162,10 @@ export function commonWork(
 	 */
 	let checkMessage = workPreCheckMessage({
 		onrun: () => startBtnPressed === false && start(),
-		onclose: (_, closedMsg) => (checkMessage = closedMsg),
+		onclose: (_, closedMsg) => {
+			startBtnPressed = true;
+			checkMessage = closedMsg;
+		},
 		onNoAIConfig: () => {
 			checkFailed = true;
 		},
@@ -165,66 +185,137 @@ export function commonWork(
 		});
 	});
 
-	const start = async (questionIndexes?: number[], replace = false, unfinished = false) => {
-		if (starting || (running && !replace)) return;
-		starting = true;
-		try {
-			assertQuestionReviewIdle();
-			if (replace) {
-				if (running) $message.info('正在取消当前任务，完成停止后重新开始。');
-				worker?.emit('close');
-				// Let an already sent request settle before replacing its worker; do not send it twice.
-				await (worker as any)?.waitForIdle?.();
-				running = false;
-
-				await options.onRestart?.();
-			}
-			const workOptions: CommonWorkOptions = {
-				...getWorkOptions(),
-				questionIndexes,
-				appendOnly: Boolean(questionIndexes?.length),
-				forceAnswer: replace && !unfinished
-			};
-			if (!hasAnswerProvider(workOptions)) {
-				checkFailed = true;
-				aiConfigEmptyWarning(0);
-				return;
-			}
-			checkFailed = false;
-			await closeAIConfigEmptyWarning();
-			await options.beforeRunning?.();
-			if (workOptions.aiProvider === 'deepseek-web' && !activity) activity = await acquireWebActivity('work');
-			workOptions.webActivityId = activity?.id;
-			activity?.assertActive();
-			running = true;
-			worker = options.workerProvider(workOptions);
-			const currentWorker = worker;
-			const { container, controlBtn, stopBtn } = createWorkControlPanel();
-			script.panel?.body?.replaceChildren(container, workResultPanel());
-			worker?.once('done', () => {
-				if (worker !== currentWorker) return;
-				running = false;
-				if (!starting) {
-					activity?.release();
-					activity = undefined;
-				}
-				globalControlPanel = null;
-				controlBtn.disabled = true;
-				stopBtn.disabled = true;
-			});
-			if (worker) await options.onWorkerCreated?.(worker);
-			else running = false;
-		} catch (error) {
-			running = false;
-			$message.error(error instanceof Error ? error.message : String(error));
-		} finally {
-			starting = false;
-			if (!running) {
-				activity?.release();
-				activity = undefined;
-			}
-		}
+	const handleStatus = (status: WebTaskStatus) => {
+		if (status.phase === 'attention' && running && CommonProject.scripts.settings.cfg.aiProvider === 'deepseek-web')
+			worker?.emit('stop');
 	};
+	let unwatch = watchWebTaskStatus(handleStatus);
+	let pageLeft = false;
+	window.addEventListener('pagehide', () => {
+		pageLeft = true;
+		cancelStartup?.();
+		worker?.emit('close');
+		activity?.release();
+		unwatch();
+		running = false;
+	});
+	window.addEventListener('pageshow', () => {
+		if (!pageLeft) return;
+		pageLeft = false;
+		unwatch = watchWebTaskStatus(handleStatus);
+		renderPanels.forEach((render) => render());
+	});
+	function start(questionIndexes?: number[], replace = false, unfinished = false): Promise<void> {
+		if (startTask || (running && !replace)) return startTask || Promise.resolve();
+		let cancelled = false;
+		cancelStartup = () => {
+			cancelled = true;
+		};
+		const task = Promise.resolve()
+			.then(async () => {
+				try {
+					assertQuestionReviewIdle();
+					if (replace) {
+						if (running) $message.info('正在取消当前任务，完成停止后重新开始。');
+						worker?.emit('close');
+						await (worker as any)?.waitForIdle?.();
+						running = false;
+						activity?.release();
+						activity = undefined;
+						await options.onRestart?.();
+					}
+					if (cancelled) return;
+					const workOptions: CommonWorkOptions = {
+						...getWorkOptions(),
+						questionIndexes,
+						appendOnly: Boolean(questionIndexes?.length),
+						forceAnswer: replace && !unfinished
+					};
+					if (workOptions.aiProvider !== 'deepseek-web' && !hasAnswerProvider(workOptions)) {
+						checkFailed = true;
+						aiConfigEmptyWarning(0);
+						return;
+					}
+					checkFailed = false;
+					if (workOptions.aiProvider === 'deepseek-web') reportWebTaskStatus('idle', '正在准备答题。');
+					// Waiting is a real, cancellable task with visible pause/stop controls.
+					const pending = new CommonEventEmitter<WorkerEvents>() as CommonEventEmitter<WorkerEvents> & {
+						isStop: boolean;
+					};
+					pending.isStop = false;
+					pending.on('close', () => {
+						cancelled = true;
+						pending.isStop = false;
+					});
+					pending.on('stop', () => {
+						pending.isStop = true;
+					});
+					pending.on('continuate', () => {
+						pending.isStop = false;
+					});
+					worker = pending;
+					running = true;
+					renderPanels.forEach((render) => render());
+					const control = {
+						isCancelled: () => cancelled || CommonProject.scripts.settings.cfg.aiProvider !== workOptions.aiProvider,
+						isPaused: () => pending.isStop
+					};
+					await closeAIConfigEmptyWarning();
+					if (workOptions.aiProvider === 'deepseek-web') {
+						await waitForWebBridge(control);
+						activity = await acquireWebActivity('work', control);
+					}
+					if (control.isCancelled()) return;
+					await options.beforeRunning?.();
+					await waitForAI(control);
+					if (control.isCancelled()) return;
+					workOptions.webActivityId = activity?.id;
+					activity?.assertActive();
+					worker = options.workerProvider(workOptions);
+					const currentWorker = worker;
+					const { container, controlBtn, stopBtn } = createWorkControlPanel();
+					script.panel?.body?.replaceChildren(
+						container,
+						...(workOptions.aiProvider === 'deepseek-web' ? [createWebTaskStatus()] : []),
+						workResultPanel()
+					);
+					worker?.once('done', () => {
+						if (worker !== currentWorker) return;
+						running = false;
+						activity?.release();
+						activity = undefined;
+						globalControlPanel = null;
+						controlBtn.disabled = true;
+						stopBtn.disabled = true;
+					});
+					if (worker) await options.onWorkerCreated?.(worker);
+					else running = false;
+				} catch (error) {
+					running = false;
+					if (!cancelled) {
+						const message = error instanceof Error ? error.message : String(error);
+						reportWebTaskStatus('attention', message);
+						$message.error(message);
+					}
+				} finally {
+					if (cancelled) running = false;
+					if (!running) {
+						activity?.release();
+						activity = undefined;
+						renderPanels.forEach((render) => render());
+					}
+				}
+			})
+			.finally(() => {
+				if (startTask === task) {
+					startTask = undefined;
+					cancelStartup = undefined;
+				}
+			});
+		startTask = task;
+		return task;
+	}
+
 	// Register render handlers BEFORE pinning; otherwise the initial render is missed.
 	CommonProject.scripts.render.methods.pin(script);
 	renderPanels[0]?.();
@@ -240,6 +331,7 @@ export function createWorkerControl(options: {
 	onRestart: () => void | Promise<void>;
 	onCompleteUnfinished: () => void | Promise<void>;
 	activityId?: () => string | undefined;
+	canRestart?: () => boolean;
 }) {
 	let stop = Boolean((options.workerProvider() as any)?.isStop);
 	let stopMessage: MessageElement | undefined;
@@ -254,9 +346,11 @@ export function createWorkerControl(options: {
 	let actionPending = false;
 	const refresh = () => {
 		const active = CommonProject.scripts.settings.cfg.aiProvider === 'deepseek-web' ? getWebActivity() : undefined;
+		stop = Boolean((options.workerProvider() as any)?.isStop);
+		controlBtn.value = stop ? '▶️继续' : '⏸暂停';
 		const blocked = active && active.id !== options.activityId?.();
 		[startBtn, restartBtn, completeBtn].forEach((button) => {
-			button.disabled = actionPending || Boolean(blocked);
+			button.disabled = actionPending || Boolean(blocked) || (button !== startBtn && options.canRestart?.() === false);
 			button.title = blocked ? webActivityMessage(active!) : '';
 		});
 	};
@@ -286,8 +380,8 @@ export function createWorkerControl(options: {
 	completeBtn.onclick = action(options.onCompleteUnfinished);
 
 	controlBtn.onclick = () => {
-		stop = !stop;
 		const worker = options.workerProvider();
+		stop = !Boolean((worker as any)?.isStop);
 		worker?.emit?.(stop ? 'stop' : 'continuate');
 		controlBtn.value = stop ? '▶️继续' : '⏸️暂停';
 		if (stop) {

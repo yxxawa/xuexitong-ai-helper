@@ -5,6 +5,7 @@ import { readPageAnswer } from '../utils/answer-input';
 import type { AIAnswererOptions, AIQuestionPayload } from '../utils/ai';
 import type { WorkContext, CustomWork } from '@xuexitong-ai-helper/core/src/core/worker/interface';
 import { acquireWebActivity } from '../utils/web-activity';
+import { createWebTaskStatus, reportWebTaskStatus, watchWebTaskStatus } from '../utils/web-task';
 import { fillTextAnswer, fillGroupedChoices } from '../utils/answer-input';
 import { runQuestionPages } from '../utils/pagination';
 import {
@@ -1940,11 +1941,24 @@ const JobRunner = {
 			...providerConfig
 		}: CommonWorkOptions
 	) {
-		if (hasAnswerProvider(CommonProject.scripts.settings.methods.getWorkOptions()) === false) {
+		if (providerConfig.aiProvider !== 'deepseek-web' && hasAnswerProvider(CommonProject.scripts.settings.methods.getWorkOptions()) === false) {
 			return aiConfigEmptyWarning(0);
 		}
 
-		const activity = providerConfig.aiProvider === 'deepseek-web' ? await acquireWebActivity('work') : undefined;
+		let cancelled = false;
+		let unwatch: (() => void) | undefined;
+		let taskNote: MessageElement | undefined;
+		const stopButton = $ui.button('⏹停止章节答题', { onclick: () => { cancelled = true; } });
+		if (providerConfig.aiProvider === 'deepseek-web') taskNote = $message.info({ duration: 0,
+			content: h('div', {}, [createWebTaskStatus(), stopButton]) });
+		let activity: Awaited<ReturnType<typeof acquireWebActivity>> | undefined;
+		try {
+			if (providerConfig.aiProvider === 'deepseek-web') activity = await acquireWebActivity('work', { isCancelled: () => cancelled });
+		} catch (error) {
+			taskNote?.remove();
+			if (!cancelled) throw error;
+			return;
+		}
 		try {
 			console.info('开始章节测试');
 			const visual_state = CommonProject.scripts.render.cfg.visual;
@@ -2117,6 +2131,20 @@ const JobRunner = {
 			worker.opts.readAnswer = (ctx) =>
 				prepareCXQuestion(ctx, worker, chapterTestTaskQuestionTitleTransform, providerConfig);
 
+			if (providerConfig.aiProvider === 'deepseek-web') {
+				reportWebTaskStatus('idle', '章节答题已开始。');
+				const pauseButton = $ui.button('⏸暂停', { onclick: () => {
+					worker.emit(worker.isStop ? 'continuate' : 'stop');
+					pauseButton.value = worker.isStop ? '▶️继续' : '⏸暂停';
+				} });
+				stopButton.onclick = () => { cancelled = true; worker.emit('close'); };
+				taskNote?.remove();
+				taskNote = $message.info({ duration: 0, content: h('div', {}, [createWebTaskStatus(), pauseButton, stopButton]) });
+				unwatch = watchWebTaskStatus((status) => {
+					if (status.phase === 'attention') { worker.emit('stop'); pauseButton.value = '▶️继续'; }
+				});
+			}
+			if (cancelled) worker.emit('close');
 			const results = await worker.doWork();
 
 			const msg = `答题完成，将等待 ${stopSecondWhenFinish} 秒后进行保存或提交。`;
@@ -2164,7 +2192,9 @@ const JobRunner = {
 
 			worker.emit('done');
 		} finally {
+			unwatch?.(); taskNote?.remove();
 			activity?.release();
+			if (cancelled) reportWebTaskStatus('idle', '章节答题已停止。');
 		}
 	},
 	/**

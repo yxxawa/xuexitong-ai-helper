@@ -66,7 +66,8 @@ export class SearchInfosElement extends HTMLElement {
 			single: '单选题',
 			multiple: '多选题',
 			judgement: '判断题',
-			completion: '填空题'
+			completion: '填空题',
+			programming: '程序题'
 		};
 		const type_label = this.type ? Reflect.get(type_text, this.type) : '';
 
@@ -166,7 +167,9 @@ export class SearchInfosElement extends HTMLElement {
 												)
 										  )
 										: []),
-									...splitAnswer(answer).map((a) => h('code', { innerHTML: a })),
+									...(this.type === 'programming'
+										? [h('pre', { className: 'programming-answer', textContent: answer })]
+										: splitAnswer(answer).map((a) => h('code', { innerHTML: a }))),
 									resultRawButton
 								]),
 								...(solution

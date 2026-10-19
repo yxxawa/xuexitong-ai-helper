@@ -127,6 +127,7 @@ async function createUserJs() {
 
 	console.log('createUserScript: ', commonOpts.metadata.name, commonOpts.dist);
 	await createUserScript(commonOpts);
+	require('./build-programming-paste')(distResolvedPath);
 }
 
 exports.default = series(cleanOutput, buildPackages, createUserJs);

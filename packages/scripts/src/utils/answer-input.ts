@@ -1,4 +1,5 @@
 import { readLineAnswer } from './cx-question';
+import { readProgrammingAnswer, type ProgramPageWindow } from './programming';
 
 /** Keep each blank scoped to its own editor; never borrow a sibling blank's textarea. */
 function textAnswerElements(option: HTMLElement) {
@@ -73,8 +74,10 @@ export function readTextAnswer(option: HTMLElement): string {
 export function readPageAnswer(
 	type: string | undefined,
 	options: HTMLElement[],
-	root: HTMLElement
+	root: HTMLElement,
+	pageWindow?: ProgramPageWindow
 ): string | undefined {
+	if (type === 'programming') return readProgrammingAnswer(root, pageWindow);
 	if (type === 'single' || type === 'multiple' || type === 'judgement') {
 		const selected = options.flatMap((option, index) =>
 			isOptionChecked(option) ? [String.fromCharCode(65 + index)] : []

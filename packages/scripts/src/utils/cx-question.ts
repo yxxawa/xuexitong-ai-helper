@@ -1,7 +1,7 @@
 import type { AILineOptionGroup } from './ai';
 import { questionElementText } from './question';
 
-export type CXQuestionType = 'single' | 'multiple' | 'judgement' | 'completion' | 'line' | 'fill' | 'reader';
+export type CXQuestionType = 'single' | 'multiple' | 'judgement' | 'completion' | 'line' | 'fill' | 'reader' | 'programming';
 
 const LINE_CONTROLS = '.line_answer_ct .selectBox, .line_answer_ct select, .thirdUlList select, select.dept_select';
 const LEFT_COLUMN = '.firstUlList, .line_wid_half.fl';
@@ -29,6 +29,7 @@ export function getQuestionType(value: number): CXQuestionType | undefined {
 	if (value === 11) return 'line';
 	if (value === 14) return 'fill';
 	if (value === 15) return 'reader';
+	if (value === 17) return 'programming';
 }
 
 export function resolveQuestionType(
@@ -42,6 +43,8 @@ export function resolveQuestionType(
 	// Specific matching markup must win over generic textarea/radio heuristics.
 	if (ctx?.root && lineSelectBoxes(ctx.root).length) return 'line';
 	if (/连线题|連線題|匹配题|配对题|matching(?:\s+question)?/i.test(title)) return 'line';
+	if (ctx?.root?.querySelector('textarea.code-editor, .proceduralQue') || /程序题|编程题|programming(?: question)?/i.test(title))
+		return 'programming';
 	if (ctx?.type) return ctx.type;
 	if (/判断题|true or false|对错题|判斷題/i.test(title)) return 'judgement';
 	if (/多选题|多選題|multiple choice/i.test(title)) return 'multiple';

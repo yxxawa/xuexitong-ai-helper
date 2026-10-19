@@ -181,7 +181,11 @@ export class CourseWorker<E extends RawElements = RawElements> extends CommonEve
 					const infos = await this.opts.answerer(result.ctx!.elements, result.ctx!);
 					result.ctx!.searchInfos = (infos || []).map((info) => ({
 						...info,
-						results: (info.results || []).map((answer) => ({ ...answer, answer: String(answer.answer ?? '').trim() }))
+						results: (info.results || []).map((answer) => ({
+							...answer,
+							answer:
+								result.ctx!.type === 'programming' ? String(answer.answer ?? '') : String(answer.answer ?? '').trim()
+						}))
 					}));
 				} catch (error) {
 					result.error = error instanceof Error ? error.message : String(error);
@@ -213,7 +217,10 @@ export class CourseWorker<E extends RawElements = RawElements> extends CommonEve
 					if (typeof this.opts.work === 'object') {
 						if (!ctx.type || !ctx.elements.options?.length) throw new Error('无法识别题型或选项，请手动检查本题。');
 						const handler = this.opts.work.handler;
-						result.result = await createDefaultQuestionResolver(ctx)[ctx.type](
+						const resolvers = createDefaultQuestionResolver(ctx);
+						const resolver = (resolvers as Partial<Record<string, typeof resolvers.single>>)[ctx.type];
+						if (!resolver) throw new Error('此题型需要专用的答案写入器，请手动检查本题。');
+						result.result = await resolver(
 							infos,
 							ctx.elements.options as HTMLElement[],
 							async (type, answer, option, context) => {
@@ -223,6 +230,7 @@ export class CourseWorker<E extends RawElements = RawElements> extends CommonEve
 							}
 						);
 					} else result.result = await this.opts.work(ctx);
+					if (!result.result?.finish && result.result?.error) result.error = String(result.result.error);
 				} catch (error) {
 					result.error = error instanceof Error ? error.message : String(error);
 				}

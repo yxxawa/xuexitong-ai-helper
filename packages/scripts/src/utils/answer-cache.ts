@@ -27,7 +27,7 @@ export function questionCacheKey(opts: AIAnswererOptions, question: AIQuestionPa
 			provider: opts.aiProvider || 'api',
 			webSession: opts.aiProvider === 'deepseek-web' ? getWebBridgeState()?.id : undefined,
 			credential: opts.aiProvider === 'deepseek-web' ? 'web-session' : md5(opts.aiApiKey || ''),
-			title: normalize(question.title),
+			title: question.type === 'programming' ? question.title.replace(/\r\n?/g, '\n') : normalize(question.title),
 			type: question.type || 'unknown',
 			options: options.map(normalize),
 			images: question.imageUrls || [],
@@ -37,7 +37,8 @@ export function questionCacheKey(opts: AIAnswererOptions, question: AIQuestionPa
 			endpoint:
 				opts.aiProvider === 'deepseek-web' ? 'https://chat.deepseek.com' : opts.aiApiUrl.trim().replace(/\/+$/, ''),
 			model: opts.aiProvider === 'deepseek-web' ? 'web' : opts.aiModel.trim(),
-			promptVersion: 'fixed-json-v5-unlimited-output',
+			promptVersion:
+				question.type === 'programming' ? 'programming-v2-no-comments-run-three' : 'fixed-json-v5-unlimited-output',
 			temperature: opts.aiTemperature,
 			solution: Boolean(opts.aiShowSolution),
 			format: opts.aiUseResponseFormat,
@@ -72,6 +73,12 @@ export class QuestionAnswerCache {
 		this.generation++;
 		// Keep in-flight deduplication: clearing stored answers must not duplicate a live request.
 		this.store.set([]);
+	}
+	/** Remove one failed program without clearing unrelated answers. */
+	removeAnswer(opts: AIAnswererOptions, question: AIQuestionPayload) {
+		this.generation++;
+		const key = questionCacheKey(opts, question);
+		this.store.set(this.list().filter((entry) => entry.key !== key));
 	}
 	/** Explicitly accepted corrections replace old entries and cannot be overwritten by older in-flight results. */
 	replaceAnswer(
@@ -165,7 +172,13 @@ export class QuestionAnswerCache {
 					(item) => !item.error && !(item.data as any)?.skipped && item.results.some((result) => result.answer?.trim())
 				);
 				const result = info?.results.find((item) => item.answer?.trim());
-				if (info && result && this.store.enabled() && generation === this.generation) {
+				if (
+					info &&
+					result &&
+					question.type !== 'programming' &&
+					this.store.enabled() &&
+					generation === this.generation
+				) {
 					const entry: QuestionCache = {
 						version: 2,
 						key,

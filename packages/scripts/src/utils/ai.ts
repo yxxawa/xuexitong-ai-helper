@@ -10,6 +10,7 @@ import {
 	isVisionUnsupportedError,
 	type VisionOptions
 } from './vision';
+import { normalizeProgramAnswer } from './programming';
 import type { QuestionTypes } from '@xuexitong-ai-helper/core/src/core/worker/interface';
 import type { SearchInformation } from '@xuexitong-ai-helper/core/src/core/worker/search.interface';
 import { request } from '@xuexitong-ai-helper/core/src/core/utils/request';
@@ -27,7 +28,15 @@ export interface AIAnswererOptions {
 	aiVisionMode?: 'auto' | 'support' | 'unsupported';
 }
 
+export interface AIProgrammingFeedback {
+	answer: string;
+	output: string;
+	attempt: number;
+	maxAttempts: number;
+}
+
 export interface AIQuestionPayload {
+	programmingFeedback?: AIProgrammingFeedback;
 	reviewAnswer?: string;
 	title: string;
 	type?: QuestionTypes | string;
@@ -186,6 +195,7 @@ export async function queryAIAnswerer(
 
 	const userPrompt = [
 		createReviewHint(question.reviewAnswer),
+		createProgrammingFeedbackHint(question),
 		`题型：${questionTypeName}`,
 		imageUrls.length ? createImageMarkerHint(imageUrls.length) : '',
 		createChoiceOutputHint(question.type, options),
@@ -268,7 +278,7 @@ export async function queryAIAnswerer(
 		}
 
 		let rawContent = getAIContent(response);
-		let answer = resolveAIAnswer(rawContent);
+		let answer = resolveAIAnswer(rawContent, question.type);
 		let solution = normalizeAISolution(resolveAISolution(rawContent, response));
 		let normalizedAnswer = normalizeAnswerByQuestionType(answer, question.type, question.lineOptions, options, {
 			solution,
@@ -306,7 +316,7 @@ export async function queryAIAnswerer(
 				rawContent = getAIContent(response);
 				solution = normalizeAISolution(resolveAISolution(rawContent, response));
 				normalizedAnswer = normalizeAnswerByQuestionType(
-					resolveAIAnswer(rawContent),
+					resolveAIAnswer(rawContent, question.type),
 					question.type,
 					question.lineOptions,
 					options
@@ -675,7 +685,34 @@ function readTextContent(content: any) {
 		.trim();
 }
 
-function resolveAIAnswer(rawContent: any) {
+function resolveAIAnswer(rawContent: any, type?: AIQuestionPayload['type']) {
+	if (isProgrammingQuestion(type)) {
+		const content = typeof rawContent === 'string' ? rawContent : '';
+		let parsed = typeof rawContent === 'object' ? rawContent : undefined;
+		if (typeof rawContent === 'string') {
+			if (!/^(?:[\s\x60]*(?:json\s*)?)[{\[]/.test(content)) return normalizeProgramAnswer(content);
+			try {
+				parsed = JSON.parse(
+					content
+						.trim()
+						.replace(/^\x60{3}(?:json)?\s*/i, '')
+						.replace(/\x60{3}\s*$/, '')
+				);
+			} catch {
+				parsed = parseJSONLike(content);
+			}
+		}
+		const data = parsed?.data && typeof parsed.data === 'object' ? parsed.data : parsed;
+		const value =
+			typeof data?.answer === 'string'
+				? data.answer
+				: Array.isArray(data?.answers) && data.answers.length === 1 && typeof data.answers[0] === 'string'
+				? data.answers[0]
+				: undefined;
+		if (value !== undefined) return normalizeProgramAnswer(value);
+		if (typeof rawContent !== 'string' || data?.answers || /^[\s]*[\x60]*(?:json\s*)?[{\[]/.test(content)) return '';
+		return normalizeProgramAnswer(content);
+	}
 	if (Array.isArray(rawContent)) {
 		return pickAnswerFromObject(rawContent);
 	}
@@ -774,6 +811,20 @@ function createReviewHint(answer?: string) {
 		  ].join('\n');
 }
 
+function createProgrammingFeedbackHint(question: AIQuestionPayload) {
+	const feedback = question.programmingFeedback;
+	if (!feedback) return '';
+	return [
+		'上一版程序运行未通过，请结合原题和本次报错修正，返回一个完整可运行的代码字符串。',
+		'已运行 ' + feedback.attempt + '/' + feedback.maxAttempts + ' 次，本次只修正代码，不重复输出失败答案。',
+		'当前完整答案代码：',
+		feedback.answer,
+		'本次完整运行报错或测试结果：',
+		feedback.output,
+		'除非题目明确要求，否则不写注释；保留正确的缩进和输入输出格式。'
+	].join('\n');
+}
+
 function createSystemPrompt(type: AIQuestionPayload['type'], showSolution?: boolean) {
 	const basePrompt = [showSolution ? AI_SOLUTION_PROMPT : DEFAULT_AI_PROMPT, AI_JSON_ESCAPE_HINT];
 
@@ -793,6 +844,12 @@ function createSystemPrompt(type: AIQuestionPayload['type'], showSolution?: bool
 		return [
 			...basePrompt,
 			'当前题型：判断题。answer 填一个答案；优先返回页面选项原文，如“正确/错误/对/错/True/False”；只能用字母时只返回 A 或 B。'
+		].join('\n');
+	}
+	if (isProgrammingQuestion(type)) {
+		return [
+			...basePrompt,
+			'当前题型：程序题。answer 必须是可直接运行的完整源代码，answers 数组只能放这一个完整代码字符串。遵守题目和编程语言要求，保留必要的缩进、换行及字符串中的特殊字符。除非题目明确要求注释，否则源代码不写注释。不要 Markdown 围栏、说明或示例输出，不要用 # 分割代码。代码中的换行、引号与反斜杠必须按 JSON 字符串正确转义。'
 		].join('\n');
 	}
 	if (isCompletionQuestion(type)) {
@@ -817,6 +874,7 @@ export function normalizeAnswerByQuestionType(
 	options: string[] = [],
 	context: AIAnswerContext = {}
 ) {
+	if (isProgrammingQuestion(type)) return normalizeProgramAnswer(answer);
 	answer = answer.trim();
 	if (isSingleQuestion(type)) {
 		return normalizeSingleAnswer(answer, options, context);
@@ -875,6 +933,10 @@ function isMultipleQuestion(type: AIQuestionPayload['type']) {
 	return text === 'multiple' || text.includes('多选') || text.includes('multiple');
 }
 
+function isProgrammingQuestion(type: AIQuestionPayload['type']) {
+	return /^(?:programming|program|code)$|程序题|编程题/i.test(String(type || ''));
+}
+
 function isCompletionQuestion(type: AIQuestionPayload['type']) {
 	const text = String(type || '').toLowerCase();
 	return text === 'completion' || text.includes('填空') || text.includes('completion');
@@ -898,6 +960,7 @@ function isLineQuestion(type: AIQuestionPayload['type']) {
 }
 
 function getQuestionTypeLabel(type: AIQuestionPayload['type']) {
+	if (isProgrammingQuestion(type)) return '程序题(programming)';
 	if (isSingleQuestion(type)) {
 		return '单选题(single)';
 	}
@@ -1499,6 +1562,7 @@ async function queryWebAnswerer(
 		const prompt = [
 			createSystemPrompt(question.type, opts.aiShowSolution),
 			createReviewHint(question.reviewAnswer),
+			createProgrammingFeedbackHint(question),
 			'这是独立题目，请勿引用此前题目。',
 			'题型：' + getQuestionTypeLabel(question.type),
 			createChoiceOutputHint(question.type, options),
@@ -1517,7 +1581,7 @@ async function queryWebAnswerer(
 			.join('\n');
 		const rawContent = await requestWebAnswer(prompt, opts.aiAnswerTimeout, images, opts.webActivityId, control);
 		const answer = normalizeAnswerByQuestionType(
-			resolveAIAnswer(rawContent),
+			resolveAIAnswer(rawContent, question.type),
 			question.type,
 			question.lineOptions,
 			options

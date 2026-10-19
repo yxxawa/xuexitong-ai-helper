@@ -1235,6 +1235,8 @@ export const CommonProject = Project.create({
 			},
 			methods() {
 				return {
+					removeFailedProgramCache: (opts: AIAnswererOptions, question: import('../utils/ai').AIQuestionPayload): void =>
+						questionCache.removeAnswer(opts, question),
 					updateReviewedCache: (
 						opts: AIAnswererOptions,
 						question: import('../utils/ai').AIQuestionPayload,
@@ -1673,11 +1675,9 @@ function createSelectedQuestionAIAnswerPanel(result: SimplifyWorkResult) {
 			h('span', { className: 'selected-ai-answer-label' }, 'AI答案'),
 			answer
 				? h(
-						'span',
+						result.type === 'programming' ? 'pre' : 'span',
 						{ className: 'selected-ai-answer-codes' },
-						answer
-							.split('#')
-							.filter(Boolean)
+						(result.type === 'programming' ? [answer] : answer.split('#').filter(Boolean))
 							.map((item) => h('code', item))
 				  )
 				: h(

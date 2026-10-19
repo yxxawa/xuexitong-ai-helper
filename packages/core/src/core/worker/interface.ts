@@ -19,7 +19,7 @@ export type SearchedElements<E, T> = Record<keyof E, T> & {
 };
 
 /** 题目类型 */
-export type QuestionTypes = 'single' | 'multiple' | 'completion' | 'judgement' | undefined;
+export type QuestionTypes = 'single' | 'multiple' | 'completion' | 'judgement' | 'programming' | undefined;
 
 export type AnswerMatchMode = 'exact' | 'similar';
 

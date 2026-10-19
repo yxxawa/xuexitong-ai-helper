@@ -22,12 +22,13 @@ export interface ReviewTarget {
 const uuid = () =>
 	Array.from(crypto.getRandomValues(new Uint32Array(4)), (value) => value.toString(16).padStart(8, '0')).join('');
 function canonical(answer: string, question: AIQuestionPayload) {
-	return normalizeAnswerByQuestionType(
+	const normalized = normalizeAnswerByQuestionType(
 		answer,
 		question.type,
 		question.lineOptions,
 		Array.isArray(question.options) ? question.options : question.options?.split('\n') || []
-	).trim();
+	);
+	return question.type === 'programming' ? normalized : normalized.trim();
 }
 /** Proposals never change a page or enter the answer cache until explicitly accepted. */
 export class AnswerReview {

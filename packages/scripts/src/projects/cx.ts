@@ -1,10 +1,12 @@
-import { fillStandardAnswer } from '../utils/answer-writer';
+import { fillStandardAnswer, fillProgrammingAnswer } from '../utils/answer-writer';
+import { programLanguage, watchProgrammingPaste, readProgrammingAnswer } from '../utils/programming';
+import { answerProgrammingQuestion, runProgrammingAnswer, programmingRunWasPassed } from '../utils/programming-runner';
 import { registerAnswerReview } from '../utils/answer-review';
 import { questionCacheKey } from '../utils/answer-cache';
 import { readPageAnswer } from '../utils/answer-input';
-import type { AIAnswererOptions, AIQuestionPayload } from '../utils/ai';
+import { queryAIAnswerer, type AIAnswererOptions, type AIQuestionPayload } from '../utils/ai';
 import type { WorkContext, CustomWork } from '@xuexitong-ai-helper/core/src/core/worker/interface';
-import { acquireWebActivity } from '../utils/web-activity';
+import { acquireWebActivity, assertWebActivity } from '../utils/web-activity';
 import { createWebTaskStatus, reportWebTaskStatus, watchWebTaskStatus } from '../utils/web-task';
 import { fillTextAnswer, fillGroupedChoices } from '../utils/answer-input';
 import { runQuestionPages } from '../utils/pagination';
@@ -634,6 +636,7 @@ export const CXProject = Project.create({
 				};
 			},
 			oncomplete() {
+				watchProgrammingPaste(document, $gm.unsafeWindow);
 				const hackInterval = setInterval(() => {
 					if (typeof $gm.unsafeWindow.UE !== 'undefined') {
 						clearInterval(hackInterval);
@@ -738,9 +741,9 @@ function describeCXQuestion(ctx: WorkContext<any>, titleTransform: CXTitleTransf
 			ctx,
 			(elements.title || []).map((el: HTMLElement) => el?.textContent || '').join(' ')
 		) || 'unknown';
-	if (['single', 'multiple', 'judgement', 'completion'].includes(type)) ctx.type = type as typeof ctx.type;
+	if (['single', 'multiple', 'judgement', 'completion', 'programming'].includes(type)) ctx.type = type as typeof ctx.type;
 	const options =
-		type === 'completion'
+		type === 'completion' || type === 'programming'
 			? []
 			: (elements.options || []).map((option: HTMLElement) =>
 					questionOptionText(option, elements.options, images.imageUrls)
@@ -755,13 +758,15 @@ function describeCXQuestion(ctx: WorkContext<any>, titleTransform: CXTitleTransf
 					images.imageUrls
 			  )
 			: undefined;
-	return { title, type, options, lineOptions, ...images };
+	const language = type === 'programming' ? programLanguage(ctx.root) : '';
+	return { title: language ? title + '\n编程语言：' + language : title, type, options, lineOptions, ...images };
 }
 function searchCXQuestion(
 	ctx: WorkContext<any>,
 	transform: CXTitleTransform,
 	providerConfig: AIAnswererOptions,
-	webActivityId?: string
+	webActivityId?: string,
+	forceProgrammingAnswer = false
 ) {
 	const question = describeCXQuestion(ctx, transform);
 	if (!question.title) throw new Error('题目为空，请等待页面加载后重试。');
@@ -786,12 +791,54 @@ function searchCXQuestion(
 				data: { skipped: true, reason: 'incomplete_line_options' }
 			}
 		];
+	if (question.type === 'programming' && !forceProgrammingAnswer) {
+		const answer = readProgrammingAnswer(ctx.root, $gm.unsafeWindow);
+		if (answer) return [{ name: '页面已有代码（待运行验证）', data: { existing_program: true }, results: [{ question: question.title, answer }] }];
+	}
 	const { title, ...details } = question;
 	return CommonProject.scripts.apps.methods.searchAnswerInCaches(title, {
 		...details,
 		providerConfig,
 		webActivityId,
 		control: { isCancelled: ctx.isCancelled, isPaused: ctx.isPaused, waitUntilReady: ctx.waitUntilReady }
+	});
+}
+/** Run/correct against the original question; correction requests never pass through the answer cache. */
+async function answerCXProgrammingQuestion(
+	ctx: WorkContext<any>,
+	transform: CXTitleTransform,
+	providerConfig: AIAnswererOptions,
+	webActivityId?: string
+) {
+	const question = describeCXQuestion(ctx, transform);
+	const config = { ...providerConfig, webActivityId };
+	const assertCurrent = () => {
+		if (!ctx.root.isConnected || JSON.stringify(describeCXQuestion(ctx, transform)) !== JSON.stringify(question))
+			throw new Error('程序题题目或编程语言已变化，已停止自动纠错。');
+	};
+	return answerProgrammingQuestion(ctx, {
+		question,
+		pageWindow: $gm.unsafeWindow,
+		correct(payload) {
+			assertCurrent();
+			if (config.aiProvider === 'deepseek-web') assertWebActivity(webActivityId);
+			return queryAIAnswerer(config, payload, ctx);
+		},
+		onPassed(infos) {
+			assertCurrent();
+			CommonProject.scripts.apps.methods.updateReviewedCache(config, question, infos, []);
+		},
+		onFailed() { CommonProject.scripts.apps.methods.removeFailedProgramCache(config, question); },
+		onProgress(message, state) {
+			let note = ctx.root.querySelector<HTMLElement>('.xth-programming-run-note');
+			if (!note) {
+				note = ctx.root.ownerDocument.createElement('p');
+				note.className = 'xth-programming-run-note';
+				(ctx.root.querySelector('.proceduralQue') || ctx.root).append(note);
+			}
+			note.textContent = message;
+			note.dataset.state = state;
+		}
 	});
 }
 /** Register against the actual live root, including chapter roots owned by a nested frame. */
@@ -808,7 +855,7 @@ function prepareCXQuestion(
 		return {
 			question,
 			answer:
-				readPageAnswer(question.type, (ctx.elements.options || []).filter(Boolean) as HTMLElement[], ctx.root) || ''
+				readPageAnswer(question.type, (ctx.elements.options || []).filter(Boolean) as HTMLElement[], ctx.root, $gm.unsafeWindow) || ''
 		};
 	};
 	ctx.reviewId = registerAnswerReview(ctx.root, {
@@ -825,13 +872,20 @@ function prepareCXQuestion(
 		options: () => ({ ...CommonProject.scripts.settings.cfg }),
 		async apply(infos, control) {
 			if (typeof worker.opts.work !== 'function') throw new Error('此题暂不支持自动替换答案。');
-			const result = await (worker.opts.work as CustomWork<any>)({
+			const applyCtx: WorkContext<any> = {
 				...ctx,
 				searchInfos: infos,
 				isCancelled: () => !ctx.root.isConnected || Boolean(control?.isCancelled?.()),
 				waitUntilReady: undefined,
 				isPaused: undefined
-			});
+			};
+			// A review accepts the proposed answer; validate that exact proposal before committing it.
+			if (initial.type === 'programming') {
+				const filled = await fillProgrammingAnswer(applyCtx, $gm.unsafeWindow);
+				if (!filled.finish) return false;
+				return (await runProgrammingAnswer(ctx.root, readProgrammingAnswer(ctx.root, $gm.unsafeWindow)!, applyCtx, $gm.unsafeWindow)).passed;
+			}
+			const result = await (worker.opts.work as CustomWork<any>)(applyCtx);
 			return result.finish;
 		},
 		async commit(opts, question, infos) {
@@ -849,7 +903,8 @@ function prepareCXQuestion(
 		}
 	});
 	const existing = snapshot();
-	return existing.answer ? { title: existing.question.title, answer: existing.answer } : undefined;
+	return existing.answer && (initial.type !== 'programming' || programmingRunWasPassed(ctx.root, existing.answer))
+		? { title: existing.question.title, answer: existing.answer } : undefined;
 }
 
 function workOrExam(
@@ -919,12 +974,13 @@ function workOrExam(
 		},
 		/** 默认搜题方法构造器 */
 		answerer: (_elements, ctx) =>
-			searchCXQuestion(ctx, workOrExamQuestionTitleTransform, providerConfig, webActivityId),
+			searchCXQuestion(ctx, workOrExamQuestionTitleTransform, providerConfig, webActivityId, Boolean(forceAnswer)),
 
 		work: async (ctx) => {
 			const { elements, searchInfos } = ctx;
 			const type = resolveQuestionType(elements, ctx, elements.title.map((el) => el?.textContent || '').join(' '));
 
+			if (type === 'programming') return answerCXProgrammingQuestion(ctx, workOrExamQuestionTitleTransform, providerConfig, webActivityId);
 			if (type && (type === 'completion' || type === 'multiple' || type === 'judgement' || type === 'single')) {
 				return fillStandardAnswer(ctx, type, () => $.sleep(500));
 			}
@@ -2022,6 +2078,7 @@ const JobRunner = {
 					const { elements, searchInfos } = ctx;
 					const type = resolveQuestionType(elements, ctx, elements.title.map((el) => el?.textContent || '').join(' '));
 
+					if (type === 'programming') return answerCXProgrammingQuestion(ctx, chapterTestTaskQuestionTitleTransform, providerConfig, activity?.id);
 					if (type && (type === 'completion' || type === 'multiple' || type === 'judgement' || type === 'single')) {
 						return fillStandardAnswer(ctx, type, () => $.sleep(500));
 					}

@@ -1,6 +1,12 @@
 import { createDefaultQuestionResolver } from '@xuexitong-ai-helper/core/src/core/worker/question.resolver';
 import type { WorkContext } from '@xuexitong-ai-helper/core/src/core/worker/interface';
 import { fillTextAnswer, isOptionChecked, optionRow, readPageAnswer } from './answer-input';
+import {
+	normalizeProgramAnswer,
+	writeProgrammingAnswer,
+	readProgrammingAnswer,
+	type ProgramPageWindow
+} from './programming';
 
 /** Resolve first, validate all targets, then verify the answer actually persisted on the page. */
 export async function fillStandardAnswer(
@@ -71,4 +77,20 @@ export async function fillStandardAnswer(
 		readPageAnswer(type, options, ctx.root) === expected;
 	if (!finish) throw new Error('未能确认网页已保存完整答案，请检查本题后重试。');
 	return { ...result, finish };
+}
+
+/** Program code is one answer. Never split Python comments, operators or source lines into blanks. */
+export async function fillProgrammingAnswer(ctx: WorkContext<any>, pageWindow?: ProgramPageWindow) {
+	const result = ctx.searchInfos
+		.filter((info) => !info.error && !(info.data as any)?.skipped)
+		.flatMap((info) => info.results)
+		.find((result) => result.answer?.trim());
+	if (!result) return { finish: false };
+	await ctx.waitUntilReady?.();
+	if (ctx.isCancelled?.()) throw new Error('答题已取消');
+	const answer = normalizeProgramAnswer(result.answer);
+	writeProgrammingAnswer(ctx.root, answer, pageWindow);
+	if (readProgrammingAnswer(ctx.root, pageWindow) !== answer)
+		throw new Error('未能确认程序题已保存完整代码，请检查本题后重试。');
+	return { finish: true };
 }

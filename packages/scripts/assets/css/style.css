@@ -1982,3 +1982,27 @@ config-element[data-web-disabled] {
 	min-width: 36px;
 	margin-right: 8px;
 }
+
+/* Program source is one selectable block; keep indentation even in narrow result panels. */
+.programming-answer,
+pre.selected-ai-answer-codes {
+	max-width: 100%;
+	margin: 6px 0;
+	overflow: auto;
+	white-space: pre;
+	tab-size: 4;
+}
+pre.selected-ai-answer-codes code {
+	display: block;
+	white-space: inherit;
+	word-break: normal;
+	overflow-wrap: normal;
+}
+
+.xth-programming-run-note {
+	margin: 8px 0;
+	color: #555;
+	white-space: pre-wrap;
+}
+.xth-programming-run-note[data-state="passed"] { color: #168243; }
+.xth-programming-run-note[data-state="skipped"] { color: #bd3b3b; }

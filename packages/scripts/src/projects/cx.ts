@@ -39,6 +39,7 @@ import {
 	searchStudyFrames, runStudyJobs, isStudyElementVisible, studyReaderTiming
 } from '../utils/study';
 import { runStudyMedia } from '../utils/study-media';
+import { createVideoQuizController } from '../utils/video-quiz';
 import { hasAnswerProvider } from '../utils/ai';
 import {
 	getQuestionType,
@@ -193,12 +194,12 @@ export const CXProject = Project.create({
 					label: '视频内题目',
 					tag: 'select',
 					options: [
-						['random', '尝试随机作答一次'],
+						['random', '轮换选项直到通过'],
 						['ignore', '等待手动处理']
 					],
 					attrs: {
 						title:
-							'保留原生题目弹窗。随机策略对同一弹窗仅尝试一次；未通过或选择手动处理时，请自行作答。不会隐藏验证提示。'
+							'保留原生题目弹窗。自动模式每 3 秒换一个选项或多选组合重新提交，直到题目关闭；手动模式不作答。不会隐藏验证提示。'
 					},
 					defaultValue: 'random' as VideoQuizStrategy
 				},
@@ -1811,12 +1812,16 @@ const JobRunner = {
 		// @ts-ignore
 		top.currentMedia = media;
 		fixedVideoProgress();
-		const submitted = new WeakSet<HTMLElement>();
-		const notified = new WeakSet<HTMLElement>();
-		const quiz = () => {
-			const submit = doc.querySelector<HTMLElement>('#videoquiz-submit');
-			return isStudyElementVisible(submit) ? submit! : undefined;
-		};
+		const quiz = createVideoQuizController(doc, {
+			signal,
+			automatic: () => CXProject.scripts.study.cfg.videoQuizStrategy === 'random',
+			onQuestion: (automatic) => $message.warn({
+				content: automatic
+					? '检测到视频内题目，将每 3 秒轮换选项提交，直到题目关闭；不会移除题目或验证弹窗。'
+					: '检测到视频内题目，正在等待手动作答。',
+				duration: 10
+			})
+		});
 		try {
 			await runStudyMedia(media, {
 				signal,
@@ -1829,26 +1834,12 @@ const JobRunner = {
 					if (hasFaceRecognition()) await waitForFaceRecognition(signal);
 					if (hasNewFaceRecognition()) await waitForNewFaceRecognition(signal);
 				},
-				isBlocked: () => !!quiz() || hasFaceRecognition() || hasNewFaceRecognition(),
+				isBlocked: () => quiz.isBlocked() || hasFaceRecognition() || hasNewFaceRecognition(),
 				onTick: () => {
 					const errorDiv = doc.querySelector<HTMLElement>('.vjs-modal-dialog-content');
 					if (['视频文件损坏', '网络错误导致视频下载中途失败', '视频因格式不支持', '网络的问题无法加载']
 						.some((text) => errorDiv?.innerText.includes(text))) throw new Error('播放器报告加载失败，请检查网络或手动播放。');
-					const submit = quiz();
-					if (!submit) return;
-					if (!notified.has(submit)) {
-						notified.add(submit);
-						$message.warn({ content: '检测到视频内题目；未通过时请手动完成，脚本不会移除题目或验证弹窗。', duration: 10 });
-					}
-					if (setting.videoQuizStrategy === 'random' && !submitted.has(submit)) {
-						const list = Array.from(doc.querySelectorAll<HTMLElement>('.ans-videoquiz-opt label'))
-							.filter((label) => label.getClientRects().length);
-						if (list.length && !submit.hasAttribute('disabled')) {
-							submitted.add(submit);
-							list[Math.floor(Math.random() * list.length)].click();
-							submit.click();
-						}
-					}
+					quiz.tick();
 				}
 			});
 		} finally {

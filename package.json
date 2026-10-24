@@ -1,6 +1,6 @@
 {
 	"name": "xuexitong-ai-helper",
-	"version": "1.0.9",
+	"version": "1.0.10",
 	"description": "学习通 AI 辅助插件，支持自定义 AI 接口、自动答题、手动搜题和章节学习。",
 	"scripts": {
 		"dev": "gulp -f ./scripts/dev-core.js",

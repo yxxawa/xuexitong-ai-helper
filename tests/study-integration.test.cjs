@@ -14,7 +14,7 @@ function setup(t, options = {}) {
   // Isolate unrelated AI/UI dependencies, not the actual study implementation.
   const source = fs.readFileSync(path.join(ROOT, 'packages/scripts/src/projects/cx.ts'), 'utf8');
   for (const match of source.matchAll(/from ['"]([^'"]+)['"]/g)) stubs[match[1]] = {};
-  delete stubs['../utils/study']; delete stubs['../utils/study-media'];
+  delete stubs['../utils/study']; delete stubs['../utils/study-media']; delete stubs['../utils/video-quiz'];
   class Script {
     constructor(options) {
       Object.assign(this, options);
@@ -136,14 +136,18 @@ test('actual media error pauses the chapter and clears the top-level player refe
   assert.equal(e.jumps.length, 0); assert.match(e.messages.find(message => message.type === 'error').content, /加载失败/);
   assert.equal(e.window.currentMedia, undefined); assert.equal(e.clock.timers.size, 0);
 });
-test('video quiz uses native submission once, preserves other overlays and waits for manual resolution', async t => {
+test('video quiz rotates wrong answers until the native question closes and preserves other overlays', async t => {
   const e = setup(t, { attachments: [mediaAttachment('video')], cfg: { mode: 'manually' } });
   const player = addMedia(e, 'video', '<div class="ans-videoquiz"><div class="ans-videoquiz-opt"><label>A</label><label>B</label></div><button id="videoquiz-submit">submit</button></div><div class="x-component-default">keep verification</div>');
-  const doc = player.frame.contentDocument; let submits = 0; doc.querySelector('button').onclick = () => submits++;
-  const task = e.start(); await e.clock.advance(10000);
-  assert.equal(submits, 1); assert.equal(player.calls, 0); assert.ok(doc.querySelector('.ans-videoquiz'));
+  const doc = player.frame.contentDocument; const attempts = []; let selected = '';
+  doc.querySelectorAll('label').forEach(label => { label.onclick = () => { selected = label.textContent; }; });
+  doc.querySelector('button').onclick = () => { attempts.push(selected); if (selected === 'B') doc.querySelector('.ans-videoquiz').remove(); };
+  const task = e.start(); await e.clock.advance(5000);
+  assert.deepEqual(attempts, ['A']); assert.equal(player.calls, 0); assert.ok(doc.querySelector('.ans-videoquiz'));
   assert.notEqual(doc.querySelector('.x-component-default').style.display, 'none');
-  doc.querySelector('.ans-videoquiz').remove(); await e.clock.advance(2000); assert.equal(player.calls, 1);
+  await e.clock.advance(4000); assert.deepEqual(attempts, ['A', 'B']);
+  assert.equal(doc.querySelector('.ans-videoquiz'), null); assert.equal(player.calls, 1);
+  await e.clock.advance(3000); assert.deepEqual(attempts, ['A', 'B']);
   player.media.dispatchEvent(new e.window.Event('ended')); await e.clock.advance(8000); await task;
   assert.equal(e.messages.some(message => message.type === 'error'), false); assert.equal(e.clock.timers.size, 0);
 });

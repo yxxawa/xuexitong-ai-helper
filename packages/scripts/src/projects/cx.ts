@@ -34,7 +34,11 @@ import md5 from 'md5';
 // @ts-ignore
 import Typr from 'typr.js';
 import { CommonWorkOptions, playMedia } from '../utils';
-import { waitForElement, waitForMedia } from '../utils/study';
+import {
+	waitForElement, waitForMedia, assertStudyActive, studySleep, studyJobId, findStudyAttachment,
+	searchStudyFrames, runStudyJobs, isStudyElementVisible, studyReaderTiming
+} from '../utils/study';
+import { runStudyMedia } from '../utils/study-media';
 import { hasAnswerProvider } from '../utils/ai';
 import {
 	getQuestionType,
@@ -100,7 +104,7 @@ type Attachment = {
 };
 
 type Job = {
-	mid: string;
+	id: string;
 	attachment: Attachment;
 	func: { (): Promise<void> } | undefined;
 };
@@ -189,12 +193,12 @@ export const CXProject = Project.create({
 					label: '视频内题目',
 					tag: 'select',
 					options: [
-						['random', '随机答题'],
-						['ignore', '忽略']
+						['random', '尝试随机作答一次'],
+						['ignore', '等待手动处理']
 					],
 					attrs: {
 						title:
-							'视频有时在学习过程中会弹出题目，这个好像并不计算在分数内，所以可以忽略，视频可以正常观看，这里提供几个方法处理题目'
+							'保留原生题目弹窗。随机策略对同一弹窗仅尝试一次；未通过或选择手动处理时，请自行作答。不会隐藏验证提示。'
 					},
 					defaultValue: 'random' as VideoQuizStrategy
 				},
@@ -327,7 +331,7 @@ export const CXProject = Project.create({
 									const jumper = document.querySelector<HTMLSelectElement>('#pagejump');
 									if (_reader?.goPage && jumper) {
 										// 等待时间
-										const timing = parseInt(new URL(location.href).searchParams.get('timing')?.toString() || '60') + 3;
+										const timing = studyReaderTiming(location.href, document.baseURI) + 3;
 										console.log(timing);
 										await $.sleep(timing * 1000);
 										/**
@@ -1300,7 +1304,8 @@ const CXAnalyses = {
 	},
 	/** 是否完成全部章节 */
 	isFinishedAllChapters() {
-		return this.getChapterInfos().every((chapter) => chapter.unFinishCount === 0);
+		const chapters = this.getChapterInfos();
+		return chapters.length > 0 && chapters.every((chapter) => chapter.unFinishCount === 0);
 	},
 	/** 获取所有章节信息 */
 	getChapterInfos() {
@@ -1452,58 +1457,52 @@ function rateHack() {
 /**
  * cx 任务学习
  */
-export async function study(
-	opts: typeof CXProject.scripts.study.cfg & {
-		workOptions: CommonWorkOptions;
-	}
-) {
-	await $.sleep(3000);
+type StudyOptions = typeof CXProject.scripts.study.cfg & { workOptions: CommonWorkOptions };
+let activeStudy: Promise<void> | undefined;
 
+export function study(opts: StudyOptions): Promise<void> {
+	if (activeStudy) return activeStudy;
+	const controller = new AbortController();
+	const leave = () => controller.abort();
+	window.addEventListener('pagehide', leave, { once: true });
+	activeStudy = studyChapter(opts, controller.signal).catch((error) => {
+		if (!controller.signal.aborted) {
+			console.error('章节学习已暂停', error);
+			$message.error({ content: `章节学习已暂停：${String(error instanceof Error ? error.message : error)}`, duration: 0 });
+		}
+	}).finally(() => {
+		controller.abort();
+		window.removeEventListener('pagehide', leave);
+		activeStudy = undefined;
+	});
+	return activeStudy;
+}
+
+async function studyChapter(opts: StudyOptions, signal: AbortSignal) {
+	await studySleep(3000, signal);
 	const searchedJobs: Job[] = [];
-
-	let searching = true;
-
-	let attachmentCount: number = $gm.unsafeWindow.attachments?.length || 0;
-
-	const wait_timeout = 3 + attachmentCount * 2;
-
-	/** 考虑到网速级慢的同学，所以10秒后如果还没有任务点才停止 */
-	setTimeout(() => {
-		searching = false;
-	}, Math.min(wait_timeout, 10) * 1000);
-
-	/**
-	 * 递归运行任务点，一旦有新的任务点被检测到直接开始
-	 * 如果10秒内既没有任务点，也暂停了搜索，则当前则没有任务点
-	 */
-	const runJobs = async () => {
-		const job = searchJob(opts, searchedJobs);
-		// 如果存在任务点
-		if (job && job.func) {
-			try {
-				await job.func();
-			} catch (e) {
-				console.error('未知错误', e);
-			}
-
-			await $.sleep(1000);
-			await runJobs();
+	await runStudyJobs({
+		signal,
+		discover: () => searchJob(opts, searchedJobs, signal),
+		snapshot: () => {
+			const attachments: Attachment[] | undefined = Array.isArray($gm.unsafeWindow.attachments)
+				? $gm.unsafeWindow.attachments : undefined;
+			const pending = (attachments || []).filter((attachment) => {
+				if (!attachment?.property) return !!attachment?.job;
+				const id = studyJobId(attachment);
+				if (searchedJobs.some((job) => job.id === id)) return false;
+				const module = attachment.property.module;
+				if ((module === 'insertvideo' || module === 'insertaudio') && !opts.enableMedia) return false;
+				if (module === 'work' && !opts.enableChapterTest) return false;
+				if (['insertbook', 'insertdoc', 'insertflash'].includes(module) && !opts.enablePPT) return false;
+				return !!attachment.job || (module === 'work' && opts.enableChapterTest &&
+					CommonProject.scripts.settings.cfg['work-when-no-job']) || (opts.enableMedia && ['insertvideo', 'insertaudio'].includes(module) &&
+					(attachment.isPassed ? opts.restudy : opts.forceLearn));
+			}).map((attachment) => studyJobId(attachment) || '未识别的任务');
+			return { ready: !!attachments, signature: JSON.stringify(attachments || null), pending };
 		}
-		// 每次 search 一次，就减少一次文件数量
-		// 如果不加这个判断，三个任务中，中间的任务不是任务点，则会导致下面的任务全部不执行。
-		else if (attachmentCount > 0) {
-			attachmentCount--;
-			await $.sleep(1000);
-			await runJobs();
-		}
-		// 或者正在搜索
-		else if (searching) {
-			await $.sleep(1000);
-			await runJobs();
-		}
-	};
-
-	await runJobs();
+	});
+	assertStudyActive(signal);
 
 	// @ts-ignore
 	top._preChapterId = '';
@@ -1519,16 +1518,16 @@ export async function study(
 			}
 		}
 
-		if (CXAnalyses.isInFinalChapter()) {
+		if (CXAnalyses.isInFinalChapter() && CXAnalyses.isInFinalTab() &&
+			(CXProject.scripts.study.cfg.mode !== 'job' || CXAnalyses.isFinishedAllChapters())) {
 			let content = '';
 
 			if (opts.backToFirstWhenFinish) {
 				content = '已经抵达最后一个章节，10秒后返回第一个章节重新开始。';
-				setTimeout(() => {
-					top?.document.querySelector<HTMLElement>('.posCatalog_name')?.click();
-				}, 10 * 1000);
+				$message.info({ content, duration: 10 });
+				await studySleep(10 * 1000, signal);
+				top?.document.querySelector<HTMLElement>('.posCatalog_name')?.click();
 
-				$message.info({ content, duration: 30 });
 			} else {
 				if (CXAnalyses.isFinishedAllChapters()) {
 					content = '全部任务点已完成！';
@@ -1546,37 +1545,26 @@ export async function study(
 			return;
 		}
 
-		if (CXProject.scripts.study.cfg.mode === 'job') {
-			// 检测当前章节是否完成，如果已经完成则下一章
-			// 如果没有需要完成的章节，则暂停运行
-
-			if (CXAnalyses.isInFinalTab()) {
-				// 找到未完成
-				const elements = CXAnalyses.getChapterInfos()
-					.filter((el) => el.unFinishCount > 0 || el.element.parentElement?.classList.contains('posCatalog_active'))
-					.map((el) => el.element.parentElement as HTMLElement);
-				if (elements.length === 0) {
-					const content = '全部任务点已完成！';
-					$modal.alert({ content: content });
-					CommonProject.scripts.settings.methods.notificationBySetting(content, {
-						duration: 0,
-						extraTitle: '学习通AI辅助插件'
-					});
-					return;
-				}
-
-				let nextChapter = elements[0];
-				// 如果当前章节未完成，则跳转到下一个未完成章节
-				const currentIndex = elements.findIndex((el) => el.classList.contains('posCatalog_active'));
-				if (currentIndex !== -1 && currentIndex + 1 < elements.length) {
-					nextChapter = elements[currentIndex + 1];
-					CXAnalyses.scrollToActiveChapter();
-					setTimeout(() => {
-						nextChapter.querySelector<HTMLElement>('.posCatalog_name')?.click();
-					}, 1000);
-				}
+		if (CXProject.scripts.study.cfg.mode === 'job' && CXAnalyses.isInFinalTab()) {
+			const chapters = CXAnalyses.getChapterInfos();
+			if (!chapters.length || chapters.some((chapter) => !Number.isFinite(chapter.unFinishCount))) {
+				throw new Error('章节目录或未完成任务数尚未就绪，请刷新后重试。');
 			}
-		} else if (CXProject.scripts.study.cfg.mode === 'next') {
+			const current = chapters.findIndex((chapter) => chapter.element.parentElement?.classList.contains('posCatalog_active'));
+			const pending = chapters.filter((chapter) => chapter.unFinishCount > 0);
+			const nextChapter = pending.find((chapter) => chapters.indexOf(chapter) > current) ||
+				pending.find((chapter) => !chapter.element.parentElement?.classList.contains('posCatalog_active'));
+			if (!nextChapter) {
+				const content = pending.length
+					? '当前章节仍有未完成任务，请检查平台完成状态并手动处理；已暂停自动跳转。'
+					: chapters.length ? '全部任务点已完成！' : '未能读取章节目录，已暂停自动跳转。';
+				$modal.alert({ content });
+				return;
+			}
+			CXAnalyses.scrollToActiveChapter();
+			await studySleep(1000, signal);
+			nextChapter.element.click();
+		} else if (CXProject.scripts.study.cfg.mode === 'next' || CXProject.scripts.study.cfg.mode === 'job') {
 			const curCourseId = $el<HTMLInputElement>('#curCourseId', top?.document);
 			const curChapterId = $el<HTMLInputElement>('#curChapterId', top?.document);
 			const curClazzId = $el<HTMLInputElement>('#curClazzId', top?.document);
@@ -1588,7 +1576,7 @@ export async function study(
 				top._preChapterId = curChapterId.value;
 				CXAnalyses.scrollToActiveChapter();
 				// 等待跳转动画完成
-				await $.sleep(200);
+				await studySleep(200, signal);
 
 				/**
 				 * count, chapterId, courseId, clazzid, knowledgestr, checkType
@@ -1597,44 +1585,24 @@ export async function study(
 				// @ts-ignore
 				top?.PCount.next(count.length.toString(), curChapterId.value, curCourseId.value, curClazzId.value, '');
 			} else {
-				console.warn('参数错误，无法跳转下一章，请尝试手动切换。');
+				throw new Error('章节跳转参数未就绪，请刷新页面或手动切换下一节。');
 			}
 		} else {
-			console.warn('未知的跳转模式，请联系作者反馈');
+			throw new Error('未知的章节跳转模式，请重新选择学习设置。');
 		}
 	};
 
 	if (CXProject.scripts.study.cfg.mode !== 'manually') {
-		const msg = '页面任务点已完成，即将跳转。';
+		const msg = '当前页面可执行任务处理结束，即将跳转；完成状态以平台记录为准。';
 		$message.success({ content: msg });
 		console.info(msg);
-		await $.sleep(5000);
-		next();
+		await studySleep(5000, signal);
+		await next();
 	} else {
-		const msg = '页面任务点已完成，自动跳转已关闭，请手动跳转。';
+		const msg = '当前页面可执行任务处理结束，自动跳转已关闭，请核对平台记录后手动跳转。';
 		$message.warn({ content: msg, duration: 0 });
 		console.warn(msg);
 	}
-}
-
-function searchIFrame(root: Document) {
-	let list = Array.from(root.querySelectorAll('iframe'));
-	const result: HTMLIFrameElement[] = [];
-	while (list.length) {
-		const frame = list.shift();
-
-		try {
-			if (frame && frame?.contentWindow?.document) {
-				result.push(frame);
-				const frames = frame?.contentWindow?.document.querySelectorAll('iframe');
-				list = list.concat(Array.from(frames || []));
-			}
-		} catch (e) {
-			// @ts-ignore
-			console.log(e.message);
-		}
-	}
-	return result;
 }
 
 /**
@@ -1644,7 +1612,8 @@ function searchJob(
 	opts: typeof CXProject.scripts.study.cfg & {
 		workOptions: CommonWorkOptions;
 	},
-	searchedJobs: Job[]
+	searchedJobs: Job[],
+	signal: AbortSignal
 ): Job | undefined {
 	const knowCardWin = $gm.unsafeWindow;
 
@@ -1668,29 +1637,10 @@ function searchJob(
 		const { videojs, read, chapterTest, hyperlink, pptWithAudio, timereader } = searchJobElement(root);
 
 		if (win && (videojs || read || chapterTest || hyperlink || pptWithAudio || timereader)) {
-			// 获取任务点数据字符串
-			const frame_data_str =
-				win.frameElement?.getAttribute('data') ||
-				// 带音频的PPT，套了两层iframe
-				(win.frameElement as HTMLIFrameElement)?.contentWindow?.parent.frameElement?.getAttribute('data') ||
-				'{}';
-			const frame_data = JSON.parse(frame_data_str);
-			const target_jobid = frame_data.jobid || frame_data._jobid;
-			if (!target_jobid) {
-				return;
-			}
-
-			// 获取任务点数据
-			const attachment: Attachment | undefined = (knowCardWin.attachments as any[]).find((attachment) => {
-				const attachment_jobid = attachment.jobid || attachment.property._jobid;
-				if (!attachment_jobid) {
-					return false;
-				}
-				return String(attachment_jobid) === String(target_jobid);
-			});
-
-			// 任务点去重
-			if (attachment && searchedJobs.find((job) => job.mid === attachment.property.mid) === undefined) {
+			const attachments = Array.isArray(knowCardWin.attachments)
+				? knowCardWin.attachments.filter((attachment: Attachment) => attachment?.property) : [];
+			const attachment = findStudyAttachment<Attachment>(root, attachments);
+			if (attachment && !searchedJobs.some((job) => job.id === studyJobId(attachment))) {
 				const { name, title, bookname, author } = attachment.property;
 				const jobName = name || title || (bookname ? bookname + author : undefined) || '未知任务';
 
@@ -1723,7 +1673,7 @@ function searchJob(
 									}播放 : ` + jobName;
 								$message.info({ content: msg });
 								console.log(msg);
-								return JobRunner.media(opts, win.document);
+								return JobRunner.media(opts, win.document, signal);
 							};
 						}
 					}
@@ -1749,12 +1699,13 @@ function searchJob(
 							) {
 								if (hasAnswerProvider(opts.workOptions) === false) {
 									aiConfigEmptyWarning(0);
+									func = async () => { throw new Error('章节测试未配置可用 AI，已暂停自动跳转，请配置或手动完成。'); };
 								} else {
 									func = () => {
 										const msg = `开始答题 : ` + jobName;
 										$message.info({ content: msg });
 										console.log(msg);
-										return JobRunner.chapter(root, opts.workOptions);
+										return JobRunner.chapter(root, opts.workOptions, signal);
 									};
 								}
 							}
@@ -1777,11 +1728,11 @@ function searchJob(
 								$message.info({ content: msg });
 								console.log(msg);
 								if (read) {
-									return JobRunner.read(win);
+									return JobRunner.read(win, signal);
 								} else if (timereader) {
-									return JobRunner.timereader(timereader as HTMLIFrameElement);
+									return JobRunner.timereader(timereader as HTMLIFrameElement, signal);
 								} else {
-									return JobRunner.readPPTWithAudio(win);
+									return JobRunner.readPPTWithAudio(win, signal);
 								}
 							};
 						}
@@ -1797,14 +1748,14 @@ function searchJob(
 								const msg = `正在完成链接阅读任务 : ` + jobName;
 								$message.info({ content: msg });
 								console.log(msg);
-								return JobRunner.hyperlink(hyperlink);
+								return JobRunner.hyperlink(hyperlink, signal);
 							};
 						}
 					}
 				}
 
 				const job = {
-					mid: attachment.property.mid,
+					id: studyJobId(attachment),
 					attachment: attachment,
 					func: func
 				};
@@ -1818,8 +1769,9 @@ function searchJob(
 
 	let job;
 
-	for (const iframe of searchIFrame(knowCardWin.document)) {
-		job = search(iframe);
+	for (const iframe of searchStudyFrames(knowCardWin.document)) {
+		try { job = search(iframe); }
+		catch (error) { console.debug('任务 frame 尚未就绪', error); continue; }
 		if (job) {
 			return job;
 		}
@@ -1848,138 +1800,87 @@ const JobRunner = {
 	 * 播放视频和音频
 	 */
 	async media(
-		setting: {
-			playbackRate: number;
-			volume: number;
-			videoQuizStrategy: VideoQuizStrategy;
-		},
-		doc: Document
+		setting: { playbackRate: number; volume: number; videoQuizStrategy: VideoQuizStrategy },
+		doc: Document,
+		signal?: AbortSignal
 	) {
-		const { playbackRate = 1, volume = 0 } = setting;
-
-		const media = await waitForMedia({ root: doc });
-
-		// @ts-ignore
+		const media = await waitForMedia({ root: doc, signal });
 		const { videojs } = domSearch({ videojs: '#video,#audio' }, doc);
-
-		if (!videojs || !media) {
-			console.error('视频检测不到，请尝试刷新或者手动切换下一章。');
-			return;
-		}
-
+		if (!videojs) throw new Error('未找到播放器，请刷新或手动播放。');
 		state.study.videojs = videojs;
 		// @ts-ignore
 		top.currentMedia = media;
-
-		// 固定视频进度
 		fixedVideoProgress();
-
-		return new Promise<void>((resolve, reject) => {
-			let finished = false;
-			let quizBusy = false;
-			let playTimer: ReturnType<typeof setTimeout> | undefined;
-			let quizTimer: ReturnType<typeof setInterval> | undefined;
-			let hideTimer: ReturnType<typeof setTimeout> | undefined;
-			const finish = (error?: unknown) => {
-				if (finished) return;
-				finished = true;
-				clearInterval(reloadInterval);
-				clearInterval(quizTimer);
-				clearTimeout(playTimer);
-				clearTimeout(hideTimer);
-				media.removeEventListener('pause', resume);
-				media.removeEventListener('ended', ended);
-				doc.defaultView?.removeEventListener('pagehide', leave);
-				if (error) reject(error);
-				else resolve();
-			};
-			const leave = () => finish();
-			const ended = () => {
-				console.log('视频播放完毕');
-				finish();
-			};
-			const playFunction = async () => {
-				if (finished) return;
-				if (hasFaceRecognition()) await waitForFaceRecognition();
-				if (hasNewFaceRecognition()) await waitForNewFaceRecognition();
-				if (!finished && !media.ended) {
-					await $.sleep(1000);
-					if (finished) return;
-					await media.play();
-					media.playbackRate = playbackRate;
+		const submitted = new WeakSet<HTMLElement>();
+		const notified = new WeakSet<HTMLElement>();
+		const quiz = () => {
+			const submit = doc.querySelector<HTMLElement>('#videoquiz-submit');
+			return isStudyElementVisible(submit) ? submit! : undefined;
+		};
+		try {
+			await runStudyMedia(media, {
+				signal,
+				settings: () => ({
+					playbackRate: Number(CXProject.scripts.study.cfg.playbackRate),
+					volume: CXProject.scripts.study.cfg.volume
+				}),
+				play: (play, signal) => playMedia(play, signal),
+				beforePlay: async (signal) => {
+					if (hasFaceRecognition()) await waitForFaceRecognition(signal);
+					if (hasNewFaceRecognition()) await waitForNewFaceRecognition(signal);
+				},
+				isBlocked: () => !!quiz() || hasFaceRecognition() || hasNewFaceRecognition(),
+				onTick: () => {
+					const errorDiv = doc.querySelector<HTMLElement>('.vjs-modal-dialog-content');
+					if (['视频文件损坏', '网络错误导致视频下载中途失败', '视频因格式不支持', '网络的问题无法加载']
+						.some((text) => errorDiv?.innerText.includes(text))) throw new Error('播放器报告加载失败，请检查网络或手动播放。');
+					const submit = quiz();
+					if (!submit) return;
+					if (!notified.has(submit)) {
+						notified.add(submit);
+						$message.warn({ content: '检测到视频内题目；未通过时请手动完成，脚本不会移除题目或验证弹窗。', duration: 10 });
+					}
+					if (setting.videoQuizStrategy === 'random' && !submitted.has(submit)) {
+						const list = Array.from(doc.querySelectorAll<HTMLElement>('.ans-videoquiz-opt label'))
+							.filter((label) => label.getClientRects().length);
+						if (list.length && !submit.hasAttribute('disabled')) {
+							submitted.add(submit);
+							list[Math.floor(Math.random() * list.length)].click();
+							submit.click();
+						}
+					}
 				}
-			};
-			const resume = () => {
-				void playFunction().catch(finish);
-			};
-			const reloadInterval = setInterval(() => {
-				const errorDiv = doc.querySelector<HTMLElement>('.vjs-modal-dialog-content');
-				if (
-					['视频文件损坏', '网络错误导致视频下载中途失败', '视频因格式不支持', '网络的问题无法加载'].some((text) =>
-						errorDiv?.innerText.includes(text)
-					)
-				) {
-					$message.error('检测到视频加载失败，即将跳过视频。');
-					finish();
-				}
-			}, 3000);
-			if (setting.videoQuizStrategy === 'random') {
-				quizTimer = setInterval(() => {
-					const submit = doc.querySelector<HTMLElement>('#videoquiz-submit');
-					if (finished || quizBusy || !submit) return;
-					quizBusy = true;
-					const list = Array.from(doc.querySelectorAll<HTMLElement>('.ans-videoquiz-opt label'));
-					list[Math.floor(Math.random() * list.length)]?.click();
-					submit.click();
-					hideTimer = setTimeout(() => {
-						if (finished) return;
-						doc.querySelector('#video .ans-videoquiz')?.remove();
-						doc.querySelectorAll<HTMLElement>('.x-component-default').forEach((component) => {
-							component.style.display = 'none';
-						});
-						quizBusy = false;
-					}, 3000);
-				}, 3000);
-			}
-			media.addEventListener('pause', resume);
-			media.addEventListener('ended', ended);
-			doc.defaultView?.addEventListener('pagehide', leave);
-			console.log('视频开始播放');
-			media.volume = volume;
-			media.currentTime = 0;
-			playTimer = setTimeout(() => {
-				void playMedia(() => media.play())
-					.then((playing) => {
-						if (!playing) finish(new Error('视频无法播放，已停止检测。'));
-						else if (!finished) media.playbackRate = playbackRate;
-					})
-					.catch(finish);
-			}, 200);
-		});
+			});
+		} finally {
+			// @ts-ignore
+			if (top.currentMedia === media) top.currentMedia = undefined;
+			if (state.study.videojs === videojs) state.study.videojs = undefined;
+		}
 	},
 	/**
 	 * 阅读，PPT
 	 */
-	async read(win: Window & { finishJob?: Function }) {
-		const finishJob = win.finishJob;
-		if (finishJob) finishJob();
-		await $.sleep(3000);
+	async read(win: Window & { finishJob?: Function }, signal?: AbortSignal) {
+		assertStudyActive(signal);
+		if (!win.finishJob) throw new Error('文档阅读接口未就绪，请手动完成阅读。');
+		win.finishJob();
+		await studySleep(3000, signal);
 	},
 	/**
 	 * 时间阅读
 	 */
-	async timereader(iframe: HTMLIFrameElement) {
+	async timereader(iframe: HTMLIFrameElement, signal?: AbortSignal) {
 		const src = iframe.getAttribute('src')?.toString() || '';
-		const timing = src ? parseInt(new URL(src).searchParams.get('timing')?.toString() || '60') : 60;
+		const timing = studyReaderTiming(src, iframe.ownerDocument.baseURI);
 		$message.info({
 			content: `正在学习长时阅读任务，请稍等，不要切换..（预计${(timing + 3) * 3}秒）`,
 			duration: (timing + 3) * 3
 		});
 		// 这里依靠 onactive 第一个跨域处理程序，等待处理后继续即可
 		// 一共有三步，第一步等待timing，然后切换正文页，然后是封底页，最后点击一次PPT文档切换界面，即可完成任务
-		await $.sleep((timing + 3) * 3 * 1000);
-		$message.success('长时阅读任务完成！');
-		await $.sleep(5000);
+		await studySleep((timing + 3) * 3 * 1000, signal);
+		$message.info('长时阅读预计等待时间已结束，请以平台任务标记为准。');
+		await studySleep(5000, signal);
 	},
 	/**
 	 * 章节测验
@@ -1995,13 +1896,18 @@ const JobRunner = {
 			answerSeparators,
 			answerMatchMode,
 			...providerConfig
-		}: CommonWorkOptions
+		}: CommonWorkOptions,
+		signal?: AbortSignal
 	) {
+		assertStudyActive(signal);
 		if (providerConfig.aiProvider !== 'deepseek-web' && hasAnswerProvider(CommonProject.scripts.settings.methods.getWorkOptions()) === false) {
 			return aiConfigEmptyWarning(0);
 		}
 
 		let cancelled = false;
+		let closeWorker: (() => void) | undefined;
+		const cancel = () => { cancelled = true; closeWorker?.(); };
+		signal?.addEventListener('abort', cancel, { once: true });
 		let unwatch: (() => void) | undefined;
 		let taskNote: MessageElement | undefined;
 		const stopButton = $ui.button('⏹停止章节答题', { onclick: () => { cancelled = true; } });
@@ -2012,8 +1918,8 @@ const JobRunner = {
 			if (providerConfig.aiProvider === 'deepseek-web') activity = await acquireWebActivity('work', { isCancelled: () => cancelled });
 		} catch (error) {
 			taskNote?.remove();
-			if (!cancelled) throw error;
-			return;
+			signal?.removeEventListener('abort', cancel);
+			throw error;
 		}
 		try {
 			console.info('开始章节测试');
@@ -2185,6 +2091,8 @@ const JobRunner = {
 					}
 				}
 			});
+			closeWorker = () => worker.emit('close');
+			worker.on('close', () => { cancelled = true; });
 			worker.opts.readAnswer = (ctx) =>
 				prepareCXQuestion(ctx, worker, chapterTestTaskQuestionTitleTransform, providerConfig);
 
@@ -2203,11 +2111,13 @@ const JobRunner = {
 			}
 			if (cancelled) worker.emit('close');
 			const results = await worker.doWork();
+			assertStudyActive(signal);
+			await worker.waitUntilReady();
 
 			const msg = `答题完成，将等待 ${stopSecondWhenFinish} 秒后进行保存或提交。`;
 			console.info(msg);
 			$message.info({ content: msg, duration: stopSecondWhenFinish });
-			await $.sleep(stopSecondWhenFinish * 1000);
+			await studySleep(stopSecondWhenFinish * 1000, signal);
 
 			// Re-check after the countdown: stop/pause also controls saving and submission.
 			await worker.waitUntilReady();
@@ -2219,14 +2129,14 @@ const JobRunner = {
 					console.info(msg);
 					$message.success({ content: msg, duration: 3 });
 
-					await $.sleep(3000);
+					await studySleep(3000, signal);
 
 					await worker.waitUntilReady();
 					if (uploadable) {
 						// @ts-ignore 提交
 						frameWindow.btnBlueSubmit();
 
-						await $.sleep(3000);
+						await studySleep(3000, signal);
 						/** 确定按钮 */
 						await worker.waitUntilReady();
 						// @ts-ignore 确定
@@ -2249,6 +2159,7 @@ const JobRunner = {
 
 			worker.emit('done');
 		} finally {
+			signal?.removeEventListener('abort', cancel);
 			unwatch?.(); taskNote?.remove();
 			activity?.release();
 			if (cancelled) reportWebTaskStatus('idle', '章节答题已停止。');
@@ -2257,7 +2168,8 @@ const JobRunner = {
 	/**
 	 * 带音频的PPT
 	 */
-	async readPPTWithAudio(win: Window & { swiperNext?: Function }) {
+	async readPPTWithAudio(win: Window & { swiperNext?: Function }, signal?: AbortSignal) {
+		if (!win.swiperNext) throw new Error('PPT 阅读接口未就绪，请手动阅读。');
 		// 关闭音视频声音
 		win.document.querySelectorAll('audio').forEach((audio) => {
 			audio.addEventListener('play', () => {
@@ -2268,15 +2180,17 @@ const JobRunner = {
 		// 阅读PPT
 		const len = win.document.querySelectorAll('.swiper-container .swiper-slide').length;
 		for (let index = 0; index < len; index++) {
-			win.swiperNext?.();
-			await $.sleep(1000);
+			assertStudyActive(signal);
+			win.swiperNext();
+			await studySleep(1000, signal);
 		}
-		await $.sleep(3000);
+		await studySleep(3000, signal);
 	},
 	/**
 	 * 链接任务点
 	 */
-	async hyperlink(a: HTMLElement) {
+	async hyperlink(a: HTMLElement, signal?: AbortSignal) {
+		assertStudyActive(signal);
 		// 修改点击事件，防止出现弹窗
 		const _click = a.onclick;
 		a.onclick = () => false;
@@ -2284,7 +2198,7 @@ const JobRunner = {
 		a.click();
 		// 还原点击事件
 		a.onclick = _click;
-		await $.sleep(3000);
+		await studySleep(3000, signal);
 	}
 };
 
@@ -2320,7 +2234,7 @@ function hasFaceRecognition() {
 	let active = false;
 	for (const face of faces) {
 		const src = face.getAttribute('src');
-		if (src) {
+		if (src && isStudyElementVisible(face)) {
 			active = true;
 			break;
 		}
@@ -2332,7 +2246,7 @@ function hasNewFaceRecognition() {
 	const faces = $$el<HTMLImageElement>('.chapterVideoFaceMaskDiv', top?.document);
 	let active = false;
 	for (const face of faces) {
-		if (face.style.display !== 'none') {
+		if (isStudyElementVisible(face)) {
 			active = true;
 			break;
 		}
@@ -2343,56 +2257,29 @@ function hasNewFaceRecognition() {
 /**
  * 等待新版人脸识别，视频开头会出现的人脸识别
  */
-function waitForNewFaceRecognition() {
-	let notified = false;
-
-	return new Promise<void>((resolve) => {
-		const interval = setInterval(() => {
-			// 人脸元素有时候 src 属性为空字符串，所以这里需要判断 src 是否为空字符串，如是则人脸识别会出现。
-			const active = hasNewFaceRecognition();
-			if (active) {
-				if (!notified) {
-					notified = true;
-					const msg = '检测到人脸识别，请手动进行识别后脚本才会继续运行。';
-					if (CXProject.scripts.study.cfg.notifyWhenHasFaceRecognition) {
-						CommonProject.scripts.settings.methods.notificationBySetting(msg, { duration: 0 });
-					}
-					$message.warn({ content: msg, duration: 0 });
-					console.warn(msg);
-				}
-			} else {
-				clearInterval(interval);
-				resolve();
-			}
-		}, 3000);
-	});
+async function waitForNewFaceRecognition(signal?: AbortSignal) {
+	await waitForFaceCheck(hasNewFaceRecognition, signal);
 }
-/**
- * 等待人脸识别
- */
-function waitForFaceRecognition() {
-	let notified = false;
+/** 等待用户手动识别，离页后不再保留轮询。 */
+async function waitForFaceRecognition(signal?: AbortSignal) {
+	await waitForFaceCheck(hasFaceRecognition, signal);
+}
 
-	return new Promise<void>((resolve) => {
-		const interval = setInterval(() => {
-			// 人脸元素有时候 src 属性为空字符串，所以这里需要判断 src 是否为空字符串，如是则人脸识别会出现。
-			const active = hasFaceRecognition();
-			if (active) {
-				if (!notified) {
-					notified = true;
-					const msg = '检测到人脸识别，请手动进行识别后脚本才会继续运行。';
-					if (CXProject.scripts.study.cfg.notifyWhenHasFaceRecognition) {
-						CommonProject.scripts.settings.methods.notificationBySetting(msg, { duration: 0 });
-					}
-					$message.warn({ content: msg, duration: 0 });
-					console.warn(msg);
-				}
-			} else {
-				clearInterval(interval);
-				resolve();
+async function waitForFaceCheck(active: () => boolean, signal?: AbortSignal) {
+	let notified = false;
+	while (active()) {
+		assertStudyActive(signal);
+		if (!notified) {
+			notified = true;
+			const msg = '检测到人脸识别，请手动进行识别后脚本才会继续运行。';
+			if (CXProject.scripts.study.cfg.notifyWhenHasFaceRecognition) {
+				CommonProject.scripts.settings.methods.notificationBySetting(msg, { duration: 0 });
 			}
-		}, 3000);
-	});
+			$message.warn({ content: msg, duration: 0 });
+		}
+		await studySleep(1000, signal);
+	}
+	assertStudyActive(signal);
 }
 
 /**

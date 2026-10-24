@@ -88,41 +88,48 @@ export function createRangeTooltip(
 }
 
 // 有些网课会改变 media.play 方法，所以可能不是一个 promise
-export async function playMedia(playFunction: () => Promise<void> | undefined | void): Promise<boolean> {
-	//  尝试播放
-	const tryPlayMedia = () => {
-		return new Promise<void>((resolve, reject) => {
-			try {
-				const playRes = playFunction();
-				if (playRes) {
-					playRes.then(resolve).catch(reject);
-				} else {
-					resolve();
-				}
-			} catch (err) {
-				reject(err);
-			}
-		});
+export async function playMedia(playFunction: () => Promise<void> | undefined | void, signal?: AbortSignal): Promise<boolean> {
+	const tryPlayMedia = async () => {
+		if (signal?.aborted) throw new Error('播放任务已取消。');
+		await playFunction();
 	};
-
 	try {
 		await tryPlayMedia();
-		return true;
-	} catch (err) {
-		console.error(err);
-		if (String(err).includes(`failed because the user didn't interact with the document first`)) {
-			$modal.alert({
-				content:
-					'播放音视频失败，由于浏览器的用户隐私保护措施，如果要播放带有音量的视频，或者某些无法自动播放音视频的网站，您必须先点击一次页面上的任意位置脚本才能进行音视频的播放，后续无需重新点击。',
-				onClose: async () => {
-					await tryPlayMedia();
-				}
+		return !signal?.aborted;
+	} catch (error) {
+		if (signal?.aborted) return false;
+		console.error(error);
+		const message = String(error);
+		if ((error as { name?: string })?.name === 'NotAllowedError' ||
+			/user didn['’]t interact|user (?:interaction|gesture)|not allowed by the user agent/i.test(message)) {
+			return new Promise<boolean>((resolve) => {
+				let settled = false;
+				let retrying = false;
+				let modal: HTMLElement | undefined;
+				const finish = (playing: boolean) => {
+					if (settled) return;
+					settled = true;
+					signal?.removeEventListener('abort', abort);
+					modal?.remove();
+					resolve(playing && !signal?.aborted);
+				};
+				const abort = () => finish(false);
+				signal?.addEventListener('abort', abort, { once: true });
+				modal = $modal.alert({
+					content: '浏览器阻止了自动播放。请先点击播放器或页面，再点击“重试播放”；无法播放时请关闭提示并手动处理。',
+					confirmButtonText: '重试播放',
+					maskCloseable: false,
+					onConfirm: async () => {
+						if (settled || retrying) return false;
+						retrying = true;
+						try { await tryPlayMedia(); finish(true); }
+						catch (retryError) { console.error(retryError); finish(false); }
+					},
+					onCancel: () => finish(false),
+					onClose: () => finish(false)
+				});
+				if (signal?.aborted) abort();
 			});
-			return true;
-		} else if (String(err).includes('The element has no supported sources')) {
-			console.error('当前视频无法播放。');
-		} else {
-			console.error('播放视频时发生未知错误：' + String(err));
 		}
 		return false;
 	}

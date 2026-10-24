@@ -66,6 +66,7 @@
 ## 项目文档
 
 - [更新日志](docs/CHANGELOG.md)：版本变化记录。
+- [章节学习对比与修复](docs/study-review-1.0.9.md)：OCS 对比、1.0.9 刷课修复、测试范围与实课验证边界。
 - [许可和来源说明](NOTICE.md)：OCS 和 easy-us 的来源与许可说明。
 
 ## Star 趋势 ⭐

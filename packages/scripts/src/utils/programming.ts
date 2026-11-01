@@ -11,6 +11,8 @@ export interface ProgramEditor {
 export interface ProgramPageWindow {
 	document?: Document;
 	codeEditors?: Record<string, ProgramEditor>;
+	CodeMirror?: { signal(editor: ProgramEditor, event: string, ...args: unknown[]): void };
+	isContentChanged?: boolean;
 }
 type EditorElement = HTMLElement & { CodeMirror?: ProgramEditor };
 
@@ -56,6 +58,35 @@ function writable(root: HTMLElement, editor: ProgramEditor, text?: HTMLTextAreaE
 		!text?.disabled
 	);
 }
+/** Reset the site's completed-run gate through its native listener without editing the document. */
+export function notifyProgrammingEditorChange(root: HTMLElement, pageWindow?: ProgramPageWindow): boolean {
+	const { editor, text } = getProgramEditor(root, pageWindow);
+	const page = [pageWindow, root.ownerDocument.defaultView as ProgramPageWindow | null].find(
+		(view) => typeof view?.CodeMirror?.signal === 'function'
+	);
+	if (!editor || !page?.CodeMirror || !writable(root, editor, text)) return false;
+	const source = editor.getValue();
+	const dirty = page.isContentChanged;
+	try {
+		page.CodeMirror.signal(editor, 'change', editor, {
+			from: { line: 0, ch: 0 },
+			to: { line: 0, ch: 0 },
+			text: [''],
+			removed: [''],
+			origin: 'xth-rerun'
+		});
+	} finally {
+		// The page's listener sets this flag even for this notification; there was no document edit.
+		if (
+			typeof dirty === 'boolean' &&
+			getProgramEditor(root, pageWindow).editor === editor &&
+			editor.getValue() === source
+		)
+			page.isContentChanged = dirty;
+	}
+	return getProgramEditor(root, pageWindow).editor === editor && editor.getValue() === source;
+}
+
 function changed(element: HTMLInputElement | HTMLTextAreaElement) {
 	const EventType = element.ownerDocument.defaultView!.Event;
 	element.dispatchEvent(new EventType('input', { bubbles: true }));

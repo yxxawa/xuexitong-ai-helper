@@ -2,11 +2,17 @@ import type { WorkContext, ResolverResult } from '@xuexitong-ai-helper/core/src/
 import type { SearchInformation } from '@xuexitong-ai-helper/core/src/core/worker/search.interface';
 import type { AIQuestionPayload } from './ai';
 import { fillProgrammingAnswer } from './answer-writer';
-import { getProgramEditor, readProgrammingAnswer, type ProgramPageWindow } from './programming';
+import {
+	getProgramEditor,
+	notifyProgrammingEditorChange,
+	readProgrammingAnswer,
+	type ProgramPageWindow
+} from './programming';
 import { waitForAI, type AIRequestControl } from './request-control';
 
 export const MAX_PROGRAM_RUNS = 3;
 const validated = new WeakMap<HTMLElement, string>();
+const activeRuns = new WeakSet<HTMLElement>();
 export interface ProgrammingRunResult {
 	passed: boolean;
 	output: string;
@@ -42,8 +48,27 @@ export async function runProgrammingAnswer(
 	pageWindow?: ProgramPageWindow
 ): Promise<ProgrammingRunResult> {
 	await waitForAI(control);
+	if (activeRuns.has(root))
+		return { passed: false, retryable: false, output: '该程序题正在运行验证，请等待本次运行完成。' };
+	activeRuns.add(root);
+	try {
+		return await runNativeProgram(root, answer, control, pageWindow);
+	} finally {
+		activeRuns.delete(root);
+	}
+}
+
+async function runNativeProgram(
+	root: HTMLElement,
+	answer: string,
+	control: AIRequestControl & { timeoutMs?: number; pollMs?: number },
+	pageWindow?: ProgramPageWindow
+): Promise<ProgrammingRunResult> {
 	const editor = getProgramEditor(root, pageWindow).editor;
 	const initialFingerprint = fingerprint(root, answer);
+	const button = root.querySelector<HTMLElement>('#runBtn');
+	const output = root.querySelector<HTMLElement>('#output') || root.querySelector<HTMLElement>('#runresult');
+	const status = root.querySelector<HTMLElement>('#runstatus');
 	const target = () => {
 		if (
 			!root.isConnected ||
@@ -53,40 +78,67 @@ export async function runProgrammingAnswer(
 			fingerprint(root, answer) !== initialFingerprint
 		)
 			throw new Error('程序题页面或代码已变化，已停止运行和自动纠错，请重新读取本题。');
+		if (
+			(button && !root.contains(button)) ||
+			(output && !root.contains(output)) ||
+			(status && !root.contains(status))
+		)
+			throw new Error('程序题运行控件已被替换，请重新读取本题。');
 	};
 	target();
 	validated.delete(root);
-	const button = root.querySelector<HTMLElement>('#runBtn');
-	const output = root.querySelector<HTMLElement>('#output') || root.querySelector<HTMLElement>('#runresult');
-	const status = root.querySelector<HTMLElement>('#runstatus');
 	if (!button || !output)
 		return { passed: false, retryable: false, output: '未找到程序题的运行按钮或结果区域，已跳过。' };
-	if (button.matches(':disabled,[aria-disabled="true"],.disabled,.jb_btn_92_disable'))
-		return { passed: false, retryable: false, output: '程序题运行按钮尚未就绪，已跳过，未重复启动运行。' };
-	const before = runOutput(output);
+	const busy = () =>
+		Boolean(status && !status.hidden && root.ownerDocument.defaultView!.getComputedStyle(status).display !== 'none');
 	let remaining = Math.max(1, control.timeoutMs ?? 60000);
 	const pollMs = Math.max(1, control.pollMs ?? 100);
+	const poll = async () => {
+		const start = Date.now();
+		await new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, remaining)));
+		remaining -= Math.max(1, Date.now() - start);
+	};
+	let notified = false;
+	for (;;) {
+		await waitForAI(control);
+		target();
+		if (busy()) {
+			if (remaining <= 0)
+				return { passed: false, retryable: false, output: '等待上一次程序运行结束超时，未重复启动运行。' };
+			await poll();
+			continue;
+		}
+		if (button.matches(':disabled,[aria-disabled="true"],.disabled'))
+			return { passed: false, retryable: false, output: '程序题运行按钮不可用，未启动运行。' };
+		if (button.classList.contains('jb_btn_92_disable')) {
+			if (notified)
+				return { passed: false, retryable: false, output: '程序题运行按钮未能恢复，请检查编辑器状态后重试。' };
+			notified = true;
+			const changed = notifyProgrammingEditorChange(root, pageWindow);
+			target();
+			if (!changed)
+				return { passed: false, retryable: false, output: '程序题编辑器暂无法恢复运行，请检查编辑器状态后重试。' };
+			continue;
+		}
+		break;
+	}
+	const before = runOutput(output);
 	button.click();
 	for (;;) {
 		await waitForAI(control);
 		target();
-		if (!root.contains(button) || !root.contains(output)) throw new Error('程序题运行控件已被替换，请重新读取本题。');
 		const current = runOutput(output);
 		const fresh =
 			current.signature !== before.signature ||
 			current.nodes.length !== before.nodes.length ||
 			current.nodes.some((node, i) => node !== before.nodes[i]);
-		const busy =
-			status && !status.hidden && root.ownerDocument.defaultView!.getComputedStyle(status).display !== 'none';
-		if (fresh && !busy && current.text && (current.passed || current.failed)) {
+		if (fresh && !busy() && current.text && (current.passed || current.failed)) {
 			if (current.passed) validated.set(root, fingerprint(root, answer));
 			return { passed: Boolean(current.passed), retryable: !current.passed, output: current.text };
 		}
 		if (remaining <= 0)
 			return { passed: false, retryable: false, output: '等待本次程序运行结果超时，已跳过，未把旧结果当作通过。' };
-		const start = Date.now();
-		await new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, remaining)));
-		remaining -= Math.max(1, Date.now() - start);
+		await poll();
 	}
 }
 

@@ -17,11 +17,16 @@ function setup(t, options = {}) {
   t.after(() => env.window.close());
   const clock = new Clock(), root = env.document.querySelector('.questionLi'), wrapper = root.querySelector('.CodeMirror');
   const backing = root.querySelector('.code-editor'), queries = [], corrections = [], runs = [], writes = [], tasks = [], messages = [];
-  let source = options.source ?? draft, workerOptions;
+  let source = options.source ?? draft, workerOptions,runSignal=Boolean(options.locked);
+  const button=root.querySelector('#runBtn'),status=root.querySelector('#runstatus'),notifications=[];
+  const changed=()=>{runSignal=false;button.className='jb_btn_92';env.window.isContentChanged=true;};
   const editor = { getValue: () => source, getOption: () => false, getTextArea: () => backing,
-    setValue: value => { writes.push(value); source = value; }, save: () => { backing.value = source; } };
-  wrapper.CodeMirror = editor; env.window.codeEditors = { 1: editor };
-  root.querySelector('#runBtn').onclick = () => { runs.push(source); const attempt=runs.length; clock.setTimeout(() => {
+    setValue: value => { writes.push(value); source = value;changed(); }, save: () => { backing.value = source; } };
+  wrapper.CodeMirror = editor; env.window.codeEditors = { 1: editor };env.window.isContentChanged=false;
+  env.window.CodeMirror={signal(target,event){assert.equal(target,editor);assert.equal(event,'change');notifications.push(event);changed();}};
+  if(options.locked)button.className='jb_btn_92_disable';
+  button.onclick = () => { if(runSignal)return;runs.push(source);button.className='jb_btn_92_disable';status.style.display='inline';clock.setTimeout(() => {
+    status.style.display='none';runSignal=true;
     if(options.noOutput)return;
     const passed=options.alwaysFail?false:source===complete;
     root.querySelector('#output').innerHTML = '<textarea class="runResult '+(passed?'result_right':'result_wrong')+'">'+(passed?'全部测试用例通过':'输出不符：程序未输出输入值的两倍')+'</textarea>';
@@ -62,7 +67,7 @@ function setup(t, options = {}) {
   const api = loadTS('packages/scripts/src/projects/cx.ts', globals, stubs);
   const defaults = { aiProvider: 'api', aiApiUrl: 'https://model.example.test/v1', aiApiKey: 'fixture', aiModel: 'fixture',
     aiTemperature: 0, aiUseResponseFormat: false, thread: 1, period: 0, redundanceWordsText: '', answerSeparators: '#', answerMatchMode: 'similar' };
-  return { ...env, clock, root, editor, queries, corrections, runs, writes, tasks, messages, api, async start(changes = {}) {
+  return { ...env, clock, root, editor, queries, corrections, runs, writes, tasks, messages, notifications, api, async start(changes = {}) {
     await api.CXProject.scripts.work.oncomplete.call(api.CXProject.scripts.work);
     const worker = workerOptions.workerProvider({ ...defaults, ...changes });
     await clock.advance(options.advanceMs || 1000);
@@ -115,4 +120,18 @@ test('an existing program with stale green output is not accepted when its new r
   const e=setup(t,{source:complete,noOutput:true,advanceMs:61000}),{results}=await e.start();
   assert.equal(e.queries.length,0);assert.equal(e.corrections.length,0);assert.deepEqual(e.writes,[]);assert.deepEqual(e.runs,[complete]);
   assert.equal(results[0].result.finish,false);assert.match(results[0].error,/超时/);
+});
+
+test('a previously run correct program with the native grey gate is tested without an AI call or source rewrite',async t=>{
+  const e=setup(t,{source:complete,locked:true}),{results}=await e.start();
+  assert.equal(results[0].result.finish,true);assert.equal(results[0].result.preAnswered,true);
+  assert.deepEqual(e.runs,[complete]);assert.deepEqual(e.writes,[]);assert.equal(e.queries.length,0);assert.equal(e.corrections.length,0);
+  assert.deepEqual(e.notifications,['change']);assert.equal(e.window.isContentChanged,false);
+});
+test('a previously run incomplete program with the native grey gate is tested first, then corrected on fresh failure',async t=>{
+  const e=setup(t,{locked:true}),{results}=await e.start();
+  assert.equal(results[0].result.finish,true);assert.equal(results[0].result.programmingAttempts,2);
+  assert.deepEqual(e.runs,[draft,complete]);assert.deepEqual(e.writes,[complete]);assert.equal(e.queries.length,0);
+  assert.equal(e.corrections.length,1);assert.equal(e.corrections[0].programmingFeedback.answer,draft);
+  assert.deepEqual(e.notifications,['change']);
 });

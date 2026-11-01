@@ -15,10 +15,13 @@ function setup(t, outcomes=[good], options={}) {
   t.after(()=>env.window.close());const clock=new Clock();const globals={...env.globals,...clock.globals()};
   const root=env.document.querySelector('#q1'),wrapper=root.querySelector('.CodeMirror'),backing=root.querySelector('.code-editor');
   const button=root.querySelector('#runBtn'),output=root.querySelector('#output'),status=root.querySelector('#runstatus');
-  let value='',signal=false;const calls=[];
-  const editor={getValue:()=>value,getOption:()=>false,getTextArea:()=>backing,getWrapperElement:()=>wrapper,
-    setValue(next){value=next;signal=false;button.className='';},replaceSelection(next){value+=next;},save(){backing.value=value;}};
-  wrapper.CodeMirror=editor;env.window.codeEditors={1:editor};
+  let value=options.source??'',signal=Boolean(options.locked);const calls=[],writes=[],notifications=[];
+  const changed=()=>{signal=false;button.className='jb_btn_92';env.window.isContentChanged=true;};
+  const editor={getValue:()=>value,getOption:()=>Boolean(options.readOnly),getTextArea:()=>backing,getWrapperElement:()=>wrapper,
+    setValue(next){writes.push(next);value=next;changed();},replaceSelection(next){value+=next;},save(){backing.value=value;}};
+  wrapper.CodeMirror=editor;env.window.codeEditors={1:editor};env.window.isContentChanged=options.dirty??false;
+  env.window.CodeMirror={signal(target,event,...args){assert.equal(target,editor);assert.equal(event,'change');notifications.push(args);changed();}};
+  if(options.locked)button.className='jb_btn_92_disable';
   const render=(outcome)=>{output.innerHTML='';for(const text of ['第 1/1 条运行结果',outcome.output]){
     const area=env.document.createElement('textarea');area.className='runResult '+(outcome.passed?'result_right':'result_wrong');area.value=text;output.append(area);}};
   if(options.initial)render(options.initial);
@@ -26,7 +29,7 @@ function setup(t, outcomes=[good], options={}) {
     const outcome=outcomes[calls.length-1];clock.setTimeout(()=>{if(outcome)render(outcome);status.style.display='none';signal=true;},options.delay??10);};
   const ctx={root,elements:{options:[]},type:'programming',searchInfos:infos('print(value)\n'),answerMatchMode:'similar'};
   const api=loadTS(ENTRY,globals);const writer=loadTS('packages/scripts/src/utils/answer-writer.ts',globals);
-  return {...env,clock,globals,root,wrapper,backing,button,output,status,editor,calls,ctx,api,writer,render};
+  return {...env,clock,globals,root,wrapper,backing,button,output,status,editor,calls,writes,notifications,ctx,api,writer,render};
 }
 function capture(promise){const result={done:false};result.promise=promise.then(value=>{result.done=true;result.value=value;},error=>{result.done=true;result.error=error;});return result;}
 const question={title:'输入一个整数并输出它\n编程语言：Python 3.6.9',type:'programming',options:[],imageUrls:['https://example.test/question.png'],hasImage:true};
@@ -134,4 +137,118 @@ test('program answers enter cache only after verified success; removing one fail
   cache.replaceAnswer(opts,question,infos('passed source'));assert.equal(entries.length,1);
   await cache.search(opts,{title:'ordinary',type:'single'},async()=>infos('A'));assert.equal(entries.length,2);
   cache.removeAnswer(opts,question);assert.equal(entries.length,1);assert.equal(entries[0].answer,'A');
+});
+
+
+test('unchanged existing code rearms the native gate without writing source, saved fields or dirty state',async t=>{
+  for(const dirty of [false,true])await t.test('preserves dirty='+dirty,async t=>{
+    const source='value = int(input())\nprint(value)\n',e=setup(t,[good],{source,locked:true,dirty});
+    e.backing.value='previous saved textarea';e.root.querySelector('#answer1').value='previous saved answer';
+    e.ctx.searchInfos=infos(source);let corrections=0;
+    const task=e.api.answerProgrammingQuestion(e.ctx,{existingAnswer:source,question,correct:async()=>{corrections++;return infos('rewritten');}});
+    await e.clock.advance(1000);const result=await task;
+    assert.equal(result.finish,true);assert.equal(result.preAnswered,true);assert.equal(corrections,0);
+    assert.deepEqual(e.calls,[source]);assert.deepEqual(e.writes,[]);assert.equal(e.editor.getValue(),source);
+    assert.equal(e.backing.value,'previous saved textarea');assert.equal(e.root.querySelector('#answer1').value,'previous saved answer');
+    assert.equal(e.window.isContentChanged,dirty);assert.equal(e.notifications.length,1);
+  });
+});
+test('a native run already in progress finishes before rearming and its green output is not accepted for the next run',async t=>{
+  const e=setup(t,[bad],{source:'print(value)',locked:true});e.status.style.display='inline';
+  e.clock.setTimeout(()=>{e.render(good);e.status.style.display='none';},30);
+  const task=e.api.runProgrammingAnswer(e.root,e.editor.getValue(),{timeoutMs:200,pollMs:5});
+  await e.clock.advance(20);assert.equal(e.calls.length,0);assert.equal(e.notifications.length,0);
+  await e.clock.advance(100);const result=await task;
+  assert.equal(result.passed,false);assert.equal(result.retryable,true);assert.match(result.output,/NameError/);
+  assert.equal(e.calls.length,1);assert.equal(e.notifications.length,1);assert.deepEqual(e.writes,[]);
+});
+test('a native busy status that never clears times out without resetting its gate or clicking again',async t=>{
+  const e=setup(t,[good],{source:'print(1)',locked:true});e.status.style.display='inline';
+  const task=e.api.runProgrammingAnswer(e.root,e.editor.getValue(),{timeoutMs:30,pollMs:5});
+  await e.clock.advance(100);const result=await task;
+  assert.equal(result.passed,false);assert.equal(result.retryable,false);assert.match(result.output,/上一次.*超时/);
+  assert.equal(e.calls.length,0);assert.equal(e.notifications.length,0);assert.equal(e.clock.timers.size,0);
+});
+test('native disabled controls, read-only editors and unavailable notification APIs never get unlocked',async t=>{
+  const cases={
+    'disabled attribute':e=>e.button.setAttribute('aria-disabled','true'),
+    'disabled class':e=>e.button.classList.add('disabled'),
+    'native disabled button':e=>{e.button.outerHTML='<button id="runBtn" disabled class="jb_btn_92_disable">运行</button>';},
+    'read-only editor':e=>{e.editor.getOption=()=>true;},
+    'read-only backing field':e=>{e.backing.readOnly=true;},
+    'disabled question':e=>e.root.setAttribute('aria-disabled','true'),
+    'missing public API':e=>{delete e.window.CodeMirror;}
+  };
+  for(const [name,alter] of Object.entries(cases))await t.test(name,async t=>{
+    const e=setup(t,[good],{source:'print(1)',locked:true});alter(e);
+    const task=e.api.runProgrammingAnswer(e.root,e.editor.getValue(),{timeoutMs:30,pollMs:5});
+    await e.clock.advance(100);const result=await task;
+    assert.equal(result.passed,false);assert.equal(result.retryable,false);assert.equal(e.calls.length,0);
+    assert.equal(e.notifications.length,0);assert.deepEqual(e.writes,[]);
+  });
+});
+test('a rearmer that fails to reset the native button is notified at most once',async t=>{
+  const e=setup(t,[good],{source:'print(1)',locked:true});let notifications=0;
+  e.window.CodeMirror.signal=()=>{notifications++;};
+  const task=e.api.runProgrammingAnswer(e.root,e.editor.getValue(),{timeoutMs:30,pollMs:5});
+  await e.clock.advance(100);const result=await task;
+  assert.equal(result.passed,false);assert.match(result.output,/未能恢复/);assert.equal(notifications,1);assert.equal(e.calls.length,0);
+});
+test('a rearmed run with no new result cannot reuse an old green result',async t=>{
+  const e=setup(t,[undefined],{source:'print(1)',locked:true,initial:good});
+  const task=e.api.runProgrammingAnswer(e.root,e.editor.getValue(),{timeoutMs:30,pollMs:5});
+  await e.clock.advance(100);const result=await task;
+  assert.equal(result.passed,false);assert.equal(result.retryable,false);assert.match(result.output,/本次.*超时/);
+  assert.equal(e.calls.length,1);assert.equal(e.notifications.length,1);
+});
+test('simultaneous validations cannot start a second run and completion releases the per-question guard',async t=>{
+  const e=setup(t,[good,good],{source:'print(1)',locked:true});
+  const first=e.api.runProgrammingAnswer(e.root,e.editor.getValue(),{timeoutMs:100,pollMs:5});
+  const duplicate=e.api.runProgrammingAnswer(e.root,e.editor.getValue(),{timeoutMs:100,pollMs:5});
+  await e.clock.advance(150);assert.equal((await first).passed,true);assert.match((await duplicate).output,/正在运行验证/);
+  assert.equal(e.calls.length,1);assert.equal(e.notifications.length,1);
+  const again=e.api.runProgrammingAnswer(e.root,e.editor.getValue(),{timeoutMs:100,pollMs:5});
+  await e.clock.advance(150);assert.equal((await again).passed,true);assert.equal(e.calls.length,2);assert.equal(e.notifications.length,2);
+});
+test('pausing during native readiness waits preserves the timeout budget and does not notify or run until resumed',async t=>{
+  const e=setup(t,[good],{source:'print(1)',locked:true});let paused=false;e.status.style.display='inline';
+  const state=capture(e.api.runProgrammingAnswer(e.root,e.editor.getValue(),{timeoutMs:60,pollMs:5,isPaused:()=>paused}));
+  e.clock.setTimeout(()=>{paused=true;},2);e.clock.setTimeout(()=>{e.status.style.display='none';},10);
+  await e.clock.advance(5000);assert.equal(state.done,false);assert.equal(e.calls.length,0);assert.equal(e.notifications.length,0);
+  paused=false;await e.clock.advance(200);await state.promise;assert.equal(state.value.passed,true);assert.equal(e.calls.length,1);
+});
+test('cancelling while waiting for a native run never resets its gate or starts another run',async t=>{
+  const e=setup(t,[good],{source:'print(1)',locked:true});let cancelled=false;e.status.style.display='inline';
+  const state=capture(e.api.runProgrammingAnswer(e.root,e.editor.getValue(),{timeoutMs:100,pollMs:5,isCancelled:()=>cancelled}));
+  e.clock.setTimeout(()=>{cancelled=true;},10);await e.clock.advance(100);await state.promise;
+  assert.match(state.error.message,/取消/);assert.equal(e.calls.length,0);assert.equal(e.notifications.length,0);
+});
+test('cancellation immediately after native notification prevents a run without editing or dirtying code',async t=>{
+  const e=setup(t,[good],{source:'print(1)',locked:true});let cancelled=false;const signal=e.window.CodeMirror.signal;
+  e.window.CodeMirror.signal=(...args)=>{signal(...args);cancelled=true;};
+  const state=capture(e.api.runProgrammingAnswer(e.root,e.editor.getValue(),{isCancelled:()=>cancelled}));
+  await e.clock.advance(100);await state.promise;assert.match(state.error.message,/取消/);
+  assert.equal(e.calls.length,0);assert.equal(e.notifications.length,1);assert.deepEqual(e.writes,[]);assert.equal(e.window.isContentChanged,false);
+});
+test('source, language and control replacements during native readiness stop without running or rearming',async t=>{
+  const cases={
+    source:e=>e.editor.setValue('manual source'),
+    language:e=>{e.root.querySelector('.languageSelect').value='2';},
+    button:e=>e.button.replaceWith(e.button.cloneNode(true)),
+    status:e=>e.status.replaceWith(e.status.cloneNode(true)),
+    editor:e=>{e.wrapper.CodeMirror={...e.editor};e.window.codeEditors[1]=e.wrapper.CodeMirror;}
+  };
+  for(const [name,alter] of Object.entries(cases))await t.test(name,async t=>{
+    const e=setup(t,[good],{source:'print(1)',locked:true});e.status.style.display='inline';
+    const state=capture(e.api.runProgrammingAnswer(e.root,e.editor.getValue(),{timeoutMs:100,pollMs:5}));
+    e.clock.setTimeout(()=>alter(e),10);await e.clock.advance(100);await state.promise;
+    assert.match(state.error.message,/变化|替换/);assert.equal(e.calls.length,0);assert.equal(e.notifications.length,0);
+  });
+});
+test('a real edit from a change listener is preserved, remains dirty and aborts the run',async t=>{
+  const e=setup(t,[good],{source:'print(1)',locked:true});
+  e.window.CodeMirror.signal=()=>e.editor.setValue('manual source');
+  const state=capture(e.api.runProgrammingAnswer(e.root,e.editor.getValue()));
+  await e.clock.advance(100);await state.promise;assert.match(state.error.message,/代码已变化/);
+  assert.equal(e.editor.getValue(),'manual source');assert.equal(e.window.isContentChanged,true);assert.equal(e.calls.length,0);
 });

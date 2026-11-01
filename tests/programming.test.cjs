@@ -158,3 +158,20 @@ for(const provider of ['api','deepseek-web'])test(provider+' correction carries 
   assert.ok(prompt.includes(title));assert.ok(prompt.includes(answer));assert.ok(prompt.includes(output));
   assert.match(prompt,/除非题目明确要求注释，否则源代码不写注释/);assert.match(prompt,/已运行 1\/3 次/);
 });
+
+for (const provider of ['api','deepseek-web']) test(provider+' sends an existing program as an unfinished draft and asks for the complete implementation', async t => {
+  const draft='value = int(input())\nprint("# draft \\\\path")\n';
+  const e=aiSetup(t,JSON.stringify({answer:code}),provider);
+  const infos=await e.ai.queryAIAnswerer(e.opts,{type:'programming',title:'读取整数并输出两倍',programmingDraft:draft});
+  assert.equal(infos[0].results[0]?.answer,code);
+  const prompt=provider==='api'?e.calls[0].messages.find(message=>message.role==='user').content:e.calls[0];
+  assert.ok(prompt.includes(draft));assert.match(prompt,/代码草稿/);assert.match(prompt,/返回完整源代码/);assert.match(prompt,/能够运行不代表已经完成/);
+});
+test('program drafts affect cache identity so different partial implementations cannot share an answer', t => {
+  const e=setup(t),{questionCacheKey}=loadTS('packages/scripts/src/utils/answer-cache.ts',e.globals,{'./web-ai':{getWebBridgeState:()=>undefined}});
+  const opts={aiApiUrl:'https://example.test/v1',aiApiKey:'fixture',aiModel:'fixture',aiTemperature:0,aiUseResponseFormat:false};
+  const question={title:'program fixture',type:'programming',programmingDraft:'value = int(input())\n'};
+  assert.notEqual(questionCacheKey(opts,question),questionCacheKey(opts,{...question,programmingDraft:'print(1)\n'}));
+  assert.notEqual(questionCacheKey(opts,question),questionCacheKey(opts,{...question,programmingDraft:undefined}));
+  assert.equal(questionCacheKey(opts,question),questionCacheKey(opts,{...question,programmingDraft:'value = int(input())\r\n'}));
+});

@@ -766,6 +766,8 @@ function describeCXQuestion(ctx: WorkContext<any>, titleTransform: CXTitleTransf
 	const language = type === 'programming' ? programLanguage(ctx.root) : '';
 	return { title: language ? title + '\n编程语言：' + language : title, type, options, lineOptions, ...images };
 }
+const programmingDrafts = new WeakMap<WorkContext<any>, string>();
+
 function searchCXQuestion(
 	ctx: WorkContext<any>,
 	transform: CXTitleTransform,
@@ -796,9 +798,11 @@ function searchCXQuestion(
 				data: { skipped: true, reason: 'incomplete_line_options' }
 			}
 		];
-	if (question.type === 'programming' && !forceProgrammingAnswer) {
-		const answer = readProgrammingAnswer(ctx.root, $gm.unsafeWindow);
-		if (answer) return [{ name: '页面已有代码（待运行验证）', data: { existing_program: true }, results: [{ question: question.title, answer }] }];
+	if (question.type === 'programming') {
+		const draft = readProgrammingAnswer(ctx.root, $gm.unsafeWindow) || '';
+		programmingDrafts.set(ctx, draft);
+		// Nonempty code is a draft, not proof that this question has been completed.
+		if (!forceProgrammingAnswer && draft) question.programmingDraft = draft;
 	}
 	const { title, ...details } = question;
 	return CommonProject.scripts.apps.methods.searchAnswerInCaches(title, {
@@ -816,6 +820,12 @@ async function answerCXProgrammingQuestion(
 	webActivityId?: string
 ) {
 	const question = describeCXQuestion(ctx, transform);
+	await ctx.waitUntilReady?.();
+	if (
+		programmingDrafts.has(ctx) &&
+		(readProgrammingAnswer(ctx.root, $gm.unsafeWindow) || '') !== programmingDrafts.get(ctx)
+	)
+		throw new Error('请求 AI 期间程序代码已被手动修改，已保留当前代码；请重新读取本题后继续。');
 	const config = { ...providerConfig, webActivityId };
 	const assertCurrent = () => {
 		if (!ctx.root.isConnected || JSON.stringify(describeCXQuestion(ctx, transform)) !== JSON.stringify(question))

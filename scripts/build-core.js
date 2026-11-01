@@ -12,12 +12,12 @@ const fs = require('fs');
 dotenv.config();
 
 const distPath = process.env.BUILD_PATH || '../dist';
-process.env.VITE_BUILD_PATH = process.env.VITE_BUILD_PATH || '../../dist';
 console.log('BUILD_PATH: ', distPath);
 const distResolvedPath = path.resolve(__dirname, distPath);
+process.env.VITE_BUILD_PATH = distResolvedPath;
 
 function cleanOutput() {
-	return del([distPath, '../lib'], { force: true });
+	return del([distResolvedPath], { force: true });
 }
 
 async function buildPackages() {
@@ -36,20 +36,8 @@ async function buildPackages() {
 async function createUserJs() {
 	const { createUserScript } = require('../packages/utils');
 
-	/** 模拟浏览器环境 */
-	require('browser-env')();
-
-	// @ts-ignore
-	globalThis.unsafeWindow = {};
-
-	/** @type {import('../packages/scripts/src/index')} */
-	// @ts-ignore
-	const app = require(path.join(distPath, 'index.js'));
-
 	/** @return {import('../packages/utils/src').CreateOptions} */
 	const createOptions = () => {
-		const { CXProject } = app;
-
 		const matchDomains = ['chaoxing.com'];
 
 		return {
@@ -103,31 +91,31 @@ async function createUserJs() {
 	const officialOpts = createOptions();
 	console.log('CreateUserScript: ', officialOpts.metadata.name, officialOpts.dist);
 	await createUserScript(officialOpts);
-
-	/** 创建调试脚本 */
-	const devOpts = createOptions();
-	devOpts.parseRequire = false;
-	devOpts.parseResource = false;
-	devOpts.metadata.name = devOpts.metadata.name + '(dev)';
-	devOpts.metadata.require = ['file:///' + path.join(distResolvedPath, 'index.js')];
-	devOpts.metadata.resource = [`STYLE file:///${path.join(__dirname, '../packages/scripts/assets/css/style.css')}`];
-	devOpts.entry = path.join(__dirname, '../packages/scripts/entry.dev.js');
-	devOpts.dist = path.join(distResolvedPath, 'xuexitong-ai-helper.dev.user.js');
-	/** 导出样式文件 */
-	fs.copyFileSync(
-		path.join(__dirname, '../packages/scripts/assets/css/style.css'),
-		path.join(distResolvedPath, 'style.css')
-	);
-	console.log('createUserScript: ', devOpts.metadata.name, devOpts.dist);
-	await createUserScript(devOpts);
-
-	/** 创建全Connect域名通用脚本 */
-	const commonOpts = createOptions();
-	commonOpts.dist = path.join(distResolvedPath, 'xuexitong-ai-helper.common.user.js');
-
-	console.log('createUserScript: ', commonOpts.metadata.name, commonOpts.dist);
-	await createUserScript(commonOpts);
-	require('./build-programming-paste')(distResolvedPath);
 }
 
-exports.default = series(cleanOutput, buildPackages, createUserJs);
+/** Keep public update metadata in sync with the version embedded in the release artifact. */
+function writeVersionMetadata(done) {
+	fs.writeFileSync(
+		path.resolve(__dirname, '../version.json'),
+		JSON.stringify(
+			{
+				version,
+				tag: `v${version}`,
+				releaseUrl: 'https://github.com/yxxawa/xuexitong-ai-helper/releases/latest'
+			},
+			null,
+			2
+		) + '\n',
+		'utf8'
+	);
+	done();
+}
+
+/** All runtime code and styles are embedded in the one installable userscript. */
+async function removeIntermediateBundles() {
+	for (const name of ['core.js', 'index.js']) {
+		await fs.promises.unlink(path.join(distResolvedPath, name));
+	}
+}
+
+exports.default = series(cleanOutput, buildPackages, createUserJs, removeIntermediateBundles, writeVersionMetadata);

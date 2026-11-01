@@ -8,13 +8,20 @@ export interface VisionOptions {
 	aiModel: string;
 	aiVisionMode?: 'auto' | 'support' | 'unsupported';
 }
-type RecordValue = { state: VisionState; source: VisionSource; updatedAt: number };
+type RecordValue = {
+	state: VisionState;
+	source: VisionSource;
+	updatedAt: number;
+	probedAt?: number;
+	probeUntil?: number;
+};
 const STORE_KEY = 'xth.ai.vision.v1';
 const MAX_AGE = 7 * 24 * 60 * 60 * 1000;
+const UNKNOWN_PROBE_MAX_AGE = 5 * 60 * 1000;
 let memory: Record<string, RecordValue> = {};
 
 function identity(opts: VisionOptions) {
-	return md5(JSON.stringify([opts.aiApiUrl.trim().replace(/\/+$/, ''), opts.aiModel.trim(), opts.aiApiKey || '']));
+	return md5(JSON.stringify([opts.aiApiUrl.trim().replace(/\/+$/, ''), opts.aiModel.trim(), opts.aiApiKey?.trim() || '']));
 }
 function records(): Record<string, RecordValue> {
 	try {
@@ -24,21 +31,71 @@ function records(): Record<string, RecordValue> {
 		return memory;
 	}
 }
-export function rememberVisionCapabilities(items: { opts: VisionOptions; state: VisionState; source: VisionSource }[]) {
-	if (!items.length) return;
-	const now = Date.now();
-	const values = new Map(Object.entries(records()).filter(([, value]) => value && now - value.updatedAt < MAX_AGE));
-	for (const item of items) {
-		const key = identity(item.opts);
-		values.delete(key);
-		values.set(key, { state: item.state, source: item.source, updatedAt: now });
-	}
+function saveRecords(values: Map<string, RecordValue>) {
 	memory = Object.fromEntries(Array.from(values).slice(-500));
 	try {
 		if (typeof GM_setValue === 'function') GM_setValue(STORE_KEY, memory);
 	} catch {
 		/* Storage may be unavailable. */
 	}
+}
+function recentRecords() {
+	const now = Date.now();
+	return new Map(Object.entries(records()).filter(([, value]) => value && now - value.updatedAt < MAX_AGE));
+}
+function probeCompletedAt(value?: RecordValue) {
+	return value?.probedAt ?? (value?.source === 'probe' ? value.updatedAt : undefined);
+}
+export function getVisionProbeStatus(opts: VisionOptions): 'idle' | 'pending' | 'complete' {
+	const value = records()[identity(opts)];
+	const probedAt = probeCompletedAt(value);
+	const maxAge = value?.state === 'unknown' ? UNKNOWN_PROBE_MAX_AGE : MAX_AGE;
+	if (probedAt !== undefined && Date.now() - probedAt < maxAge) return 'complete';
+	return value?.probeUntil && value.probeUntil > Date.now() ? 'pending' : 'idle';
+}
+/** Reserve one background probe across frames/tabs; an abandoned reservation expires. */
+export function claimVisionProbe(opts: VisionOptions, timeout: number) {
+	if (getVisionProbeStatus(opts) !== 'idle') return false;
+	const values = recentRecords();
+	const key = identity(opts);
+	const previous = values.get(key);
+	values.delete(key);
+	values.set(key, {
+		state: previous?.state || 'unknown',
+		source: previous?.source || 'unknown',
+		...previous,
+		updatedAt: Date.now(),
+		probeUntil: Date.now() + timeout
+	});
+	saveRecords(values);
+	return true;
+}
+export function rememberVisionCapabilities(items: { opts: VisionOptions; state: VisionState; source: VisionSource }[]) {
+	if (!items.length) return;
+	const now = Date.now();
+	const values = recentRecords();
+	for (const item of items) {
+		const key = identity(item.opts);
+		const previous = values.get(key);
+		const probedAt = probeCompletedAt(previous);
+		// Model metadata and merely accepting an image must not replace an actual visual test.
+		if (
+			probedAt !== undefined &&
+			now - probedAt < MAX_AGE &&
+			(item.source === 'metadata' || (item.source === 'request' && item.state === 'supported'))
+		)
+			continue;
+		values.delete(key);
+		values.set(key, {
+			...previous,
+			state: item.state,
+			source: item.source,
+			updatedAt: now,
+			...(probedAt !== undefined ? { probedAt } : {}),
+			...(item.source === 'probe' ? { probedAt: now, probeUntil: undefined } : {})
+		});
+	}
+	saveRecords(values);
 }
 export function rememberVisionCapability(opts: VisionOptions, state: VisionState, source: VisionSource) {
 	rememberVisionCapabilities([{ opts, state, source }]);

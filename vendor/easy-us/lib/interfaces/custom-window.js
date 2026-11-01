@@ -252,6 +252,7 @@ class CustomWindow {
             (preferFallbackWhenPrimaryUnmatched ? this.findScript(fallback) || this.findScript(primary) : this.findScript(primary) || this.findScript(fallback));
         return [
             { label: '首页', script: this.findScript('common.guide', urls) || this.findScript('common.guide') },
+            { label: '待办任务', script: this.findScript('common.pending-tasks', urls) || this.findScript('common.pending-tasks') },
             { label: '网课', script: matchOrFallback('cx.new.study', 'cx.new.auto-read') },
             { label: '作业/考试', script: matchOrFallback('cx.new.work', 'common.work-results', true) },
             { label: '手动搜题', script: this.findScript('common.online-search', urls) || this.findScript('common.online-search') },

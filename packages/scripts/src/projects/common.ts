@@ -1,3 +1,5 @@
+import { createVersionLink } from '../elements/version.link';
+import { createPendingTasksPanel } from '../elements/pending.tasks';
 import type { AIRequestControl } from '../utils/request-control';
 import { exportSettings, parseSettings, settingsSchema } from '../utils/settings-transfer';
 import { requestAnswerReview, getAnswerReviewView, cancelAnswerReview } from '../utils/answer-review';
@@ -13,7 +15,7 @@ import { getWebBridgeState, openDeepSeekBridge } from '../utils/web-ai';
 import { closeAIConfigEmptyWarning } from '../utils/work';
 import { $win } from 'easy-us/lib/utils/start';
 import { QuestionAnswerCache, type QuestionCache } from '../utils/answer-cache';
-import { getVisionCapability } from '../utils/vision';
+import { getVisionCapability, getVisionProbeStatus } from '../utils/vision';
 import debounce from 'lodash/debounce';
 import { $ } from '@xuexitong-ai-helper/core/src/utils/common';
 import { request } from '@xuexitong-ai-helper/core/src/core/utils/request';
@@ -31,7 +33,7 @@ import {
 	AILineOptionGroup,
 	type AIAnswererOptions,
 	fetchAIModels,
-	probeVisionModel,
+	ensureVisionModelProbed,
 	hasAnswerProvider,
 	queryAIAnswerer
 } from '../utils/ai';
@@ -74,6 +76,7 @@ const questionCache: QuestionAnswerCache = new QuestionAnswerCache({
 });
 
 type SearchAnswerOptions = {
+	programmingDraft?: string;
 	control?: AIRequestControl;
 	webActivityId?: string;
 	providerConfig?: AIAnswererOptions;
@@ -102,6 +105,14 @@ export const CommonProject = Project.create({
 				const guide = createGuide();
 				guide.style.width = '100%';
 				panel.body.replaceChildren(guide);
+			}
+		}),
+		pendingTasks: new Script({
+			name: '待办任务',
+			matches: [['所有页面', /.*/]],
+			namespace: 'common.pending-tasks',
+			onrender({ panel }) {
+				panel.body.replaceChildren(createPendingTasksPanel());
 			}
 		}),
 		settings: new Script({
@@ -194,14 +205,19 @@ export const CommonProject = Project.create({
 				},
 				aiModel: {
 					label: '模型',
-					attrs: { placeholder: '输入模型 ID，或获取列表后筛选', type: 'text', autocomplete: 'off' },
+					attrs: {
+						placeholder: '输入模型 ID，或获取列表后筛选',
+						type: 'text',
+						autocomplete: 'off',
+						title: '设置后自动在后台发送随机数字测试图验证图片能力，会产生少量 API 用量。'
+					},
 					defaultValue: '',
 					onload() {
 						this.setAttribute('list', 'xth-ai-models');
-						this.oninput = () => {
+						this.addEventListener('change', () => {
 							CommonProject.scripts.settings.cfg.aiModel = this.value.trim();
 							updateVisionStatus();
-						};
+						});
 					}
 				},
 				aiModelSuggestions: { attrs: { type: 'hidden' }, defaultValue: [] as string[] },
@@ -261,34 +277,10 @@ export const CommonProject = Project.create({
 					},
 					defaultValue: 'auto' as 'auto' | 'support' | 'unsupported',
 					options: [
-						['auto', '自动检测', '仅向已确认支持图片的模型发送图片题；能力未知时先跳过，可使用随机测试图检测。'],
+						['auto', '自动检测', '设置模型后在后台自动验证一次图片能力；检测通过后发送图片题。'],
 						['support', '强制启用', '将题干和选项图片以 base64 发送给模型。'],
 						['unsupported', '仅文本', '跳过图片题，不发送缺少图片的题目。']
 					]
-				},
-				aiVisionTestButton: {
-					label: '视觉检测',
-					defaultValue: '检测图片（少量计费）',
-					attrs: { type: 'button', title: '发送一张随机数字测试图，会产生少量 API 费用；不会发送课程或题目内容。' },
-					onload() {
-						this.value = '检测图片（少量计费）';
-						this.onclick = async () => {
-							this.disabled = true;
-							this.value = '检测中…';
-							try {
-								$modal.alert({
-									title: '视觉检测结果',
-									content: await probeVisionModel({ ...CommonProject.scripts.settings.cfg })
-								});
-							} catch (error) {
-								$message.error(error instanceof Error ? error.message : String(error));
-							} finally {
-								this.disabled = false;
-								this.value = '检测图片（少量计费）';
-								updateVisionStatus();
-							}
-						};
-					}
 				},
 				aiTemperature: {
 					label: 'AI随机度',
@@ -566,6 +558,15 @@ export const CommonProject = Project.create({
 				this.onConfigChange('aiAnswerTimeout', (sec) => {
 					WorkerConfig.timeout_seconds = sec;
 				});
+				if (window.self === window.top) {
+					for (const key of ['aiProvider', 'aiApiUrl', 'aiApiKey', 'aiModel'] as const)
+						this.onConfigChange(key, () => {
+							scheduleVisionProbe();
+							updateVisionStatus();
+						});
+					window.addEventListener('pagehide', () => scheduleVisionProbe.cancel());
+					scheduleVisionProbe();
+				}
 			},
 			onrender({ panel }) {
 				const list = h(
@@ -1360,6 +1361,12 @@ function insertCopyableStyle() {
 	document.head.append(style);
 }
 
+const scheduleVisionProbe = debounce(() => {
+	const pending = ensureVisionModelProbed({ ...CommonProject.scripts.settings.cfg });
+	updateVisionStatus();
+	void pending.then(updateVisionStatus, updateVisionStatus);
+}, 600);
+
 function visionStatusText() {
 	if (CommonProject.scripts.settings.cfg.aiProvider === 'deepseek-web') {
 		const bridge = getWebBridgeState();
@@ -1369,15 +1376,20 @@ function visionStatusText() {
 				: '专用标签页仍为旧版纯文本桥接，请刷新并重新启用后再发送图片题。'
 			: '网页未连接：打开专用标签页，登录后点击“启用此标签页”。支持图片，题目与附件会进入账号历史。';
 	}
-	const capability = getVisionCapability(CommonProject.scripts.settings.cfg);
+	const cfg = CommonProject.scripts.settings.cfg;
+	if (!hasAnswerProvider(cfg)) return '图片能力：配置完整后自动验证';
+	const probeStatus = getVisionProbeStatus(cfg);
+	if (probeStatus === 'pending') return '图片能力：正在后台验证…';
+	const capability = getVisionCapability(cfg);
 	if (capability.source === 'manual')
 		return capability.state === 'supported' ? '图片能力：已手动启用' : '图片能力：已设置仅文本';
+	if (probeStatus === 'idle') return '图片能力：等待后台自动验证';
 	if (capability.state === 'unsupported') return '图片能力：接口不支持，可更换模型或手动覆盖';
-	if (capability.state === 'unknown') return '图片能力：尚未确认，含图题先跳过；请检测或手动指定';
+	if (capability.state === 'unknown') return '图片能力：后台验证未通过，含图题先跳过；请检查接口配置或更换模型';
 	return (
 		'图片能力：' +
 		(capability.source === 'probe'
-			? '图片检测通过'
+			? '已自动验证支持图片'
 			: capability.source === 'metadata'
 			? '接口声明支持图片'
 			: '接口已接受图片，识别能力尚未核验')
@@ -1397,7 +1409,6 @@ function updateVisionStatus() {
 		'aiModel',
 		'aiModelFetchButton',
 		'aiVisionMode',
-		'aiVisionTestButton',
 		'aiTemperature',
 		'thread',
 		'aiUseResponseFormat'
@@ -1482,6 +1493,7 @@ const createGuide = () => {
 			)
 		]),
 		h('div', { className: 'home-actions' }, [
+			action('待办任务', '未完成作业、考试与剩余时间', CommonProject.scripts.pendingTasks),
 			action('课程学习', '查看学习设置', CXProject.scripts.study),
 			action('作业 / 考试', '查看答题结果', CommonProject.scripts.workResults),
 			action('手动搜题', '输入或划选题目', CommonProject.scripts.onlineSearch)
@@ -1494,7 +1506,8 @@ const createGuide = () => {
 				'项目主页'
 			)
 		]),
-		h('p', { className: 'secondary' }, 'AI 答案仅供参考，请核对后提交。')
+		h('p', { className: 'secondary' }, 'AI 答案仅供参考，请核对后提交。'),
+		h('div', { className: 'home-version' }, [createVersionLink()])
 	]);
 };
 
@@ -1509,6 +1522,7 @@ async function searchAnswer(
 		{
 			title,
 			type: searchOptions.type,
+			programmingDraft: searchOptions.programmingDraft,
 			options: searchOptions.options,
 			lineOptions: searchOptions.lineOptions,
 			hasImage: searchOptions.hasImage,

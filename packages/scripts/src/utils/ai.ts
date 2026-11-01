@@ -4,6 +4,8 @@ import { getWebBridgeState, requestWebAnswer } from './web-ai';
 import { reportWebTaskStatus } from './web-task';
 import {
 	getVisionCapability,
+	getVisionProbeStatus,
+	claimVisionProbe,
 	rememberVisionCapability,
 	rememberVisionCapabilities,
 	modelSupportsImages,
@@ -36,6 +38,7 @@ export interface AIProgrammingFeedback {
 }
 
 export interface AIQuestionPayload {
+	programmingDraft?: string;
 	programmingFeedback?: AIProgrammingFeedback;
 	reviewAnswer?: string;
 	title: string;
@@ -162,6 +165,10 @@ export async function queryAIAnswerer(
 	}
 
 	const imageUrls = Array.from(new Set((question.imageUrls || []).map((url) => String(url).trim()).filter(Boolean)));
+	if ((question.hasImage || imageUrls.length) && (!opts.aiVisionMode || opts.aiVisionMode === 'auto')) {
+		await ensureVisionModelProbed(opts, control);
+		await waitForAI(control);
+	}
 	const supportsVision = canSendImageInput(opts);
 	const provider = resolveAIProvider(opts.aiApiUrl, opts.aiModel);
 
@@ -172,7 +179,7 @@ export async function queryAIAnswerer(
 				results: [],
 				error:
 					getVisionCapability(opts).state === 'unknown'
-						? '题干或选项含图片，模型图片能力尚未确认，已跳过。请在设置中检测图片能力或手动指定。'
+						? '题干或选项含图片，后台图片能力验证未通过，已跳过。请检查接口配置、更换模型或手动指定图片能力。'
 						: '题干或选项含图片，当前模型不支持图片，已跳过。',
 				data: {
 					model: opts.aiModel,
@@ -196,6 +203,7 @@ export async function queryAIAnswerer(
 	const userPrompt = [
 		createReviewHint(question.reviewAnswer),
 		createProgrammingFeedbackHint(question),
+		createProgrammingDraftHint(question),
 		`题型：${questionTypeName}`,
 		imageUrls.length ? createImageMarkerHint(imageUrls.length) : '',
 		createChoiceOutputHint(question.type, options),
@@ -809,6 +817,17 @@ function createReviewHint(answer?: string) {
 				'当前答案：' + answer,
 				'若当前答案正确，返回相同答案；否则返回你认为正确的新答案。仍严格使用本题要求的 JSON 格式，不要只回答“正确/错误”。'
 		  ].join('\n');
+}
+
+function createProgrammingDraftHint(question: AIQuestionPayload) {
+	if (!isProgrammingQuestion(question.type) || !question.programmingDraft?.trim() || question.programmingFeedback)
+		return '';
+	return [
+		'当前编辑器中有尚未确认完成的代码草稿，可能只写了一部分。请结合原题检查并补全所有要求，返回完整源代码，不要只返回追加的片段。',
+		'已有代码或能够运行不代表已经完成题目。保留合理实现并修正缺失或错误；仍须覆盖题目的输入、输出、边界情况及指定语言。',
+		'代码草稿：',
+		question.programmingDraft
+	].join('\n');
 }
 
 function createProgrammingFeedbackHint(question: AIQuestionPayload) {
@@ -1480,7 +1499,65 @@ function stringifyCompact(value: any): string {
 	}
 }
 
-/** Explicit, tiny visual probe. No question, account or course data is sent. */
+const visionModelProbes = new Map<string, Promise<void>>();
+
+/** Automatically test each API/key/model once per cache period, including across frames/tabs. */
+export function ensureVisionModelProbed(opts: AIAnswererOptions, control: AIRequestControl = {}): Promise<void> {
+	if (opts.aiProvider === 'deepseek-web' || !isAIAnswererReady(opts)) return Promise.resolve();
+	const snapshot = {
+		...opts,
+		aiApiUrl: opts.aiApiUrl.trim(),
+		aiApiKey: opts.aiApiKey.trim(),
+		aiModel: opts.aiModel.trim()
+	};
+	try {
+		if (!/^https?:$/.test(new URL(snapshot.aiApiUrl).protocol)) return Promise.resolve();
+	} catch {
+		return Promise.resolve();
+	}
+	const key = JSON.stringify([
+		snapshot.aiApiUrl.replace(/\/+$/, ''),
+		snapshot.aiApiKey,
+		snapshot.aiModel
+	]);
+	let pending = visionModelProbes.get(key);
+	if (!pending) {
+		pending = (async () => {
+			const reservation = Math.max(5000, Number(snapshot.aiAnswerTimeout || 60) * 1000) + 30000;
+			while (!claimVisionProbe(snapshot, reservation)) {
+				if (getVisionProbeStatus(snapshot) === 'complete') return;
+				await new Promise((resolve) => setTimeout(resolve, 100));
+			}
+			try {
+				await probeVisionModel(snapshot);
+			} catch {
+				rememberVisionCapability(snapshot, 'unknown', 'probe');
+			}
+		})();
+		visionModelProbes.set(key, pending);
+		void pending.finally(() => visionModelProbes.delete(key));
+	}
+	if (!control.isCancelled) return pending;
+	return new Promise<void>((resolve, reject) => {
+		const timer = setInterval(() => {
+			if (!control.isCancelled?.()) return;
+			clearInterval(timer);
+			reject(new Error('请求已取消。'));
+		}, 100);
+		pending!.then(
+			() => {
+				clearInterval(timer);
+				resolve();
+			},
+			(error) => {
+				clearInterval(timer);
+				reject(error);
+			}
+		);
+	});
+}
+
+/** Tiny visual probe. No question, account or course data is sent. */
 export async function probeVisionModel(opts: AIAnswererOptions): Promise<string> {
 	if (!isAIAnswererReady(opts)) throw new Error('请先填写接口地址、API Key 和模型。');
 	const bytes = new Uint32Array(1);
@@ -1497,7 +1574,7 @@ export async function probeVisionModel(opts: AIAnswererOptions): Promise<string>
 	context.font = 'bold 56px sans-serif';
 	context.fillText(code, 30, 72);
 	const infos = await queryAIAnswerer(
-		{ ...opts, aiVisionMode: 'support', aiShowSolution: false, aiTemperature: 0 },
+		{ ...opts, aiVisionMode: 'support', aiShowSolution: false, aiTemperature: 0, aiUseResponseFormat: false },
 		{
 			title: '请读出图片中的四位数字。只输出 JSON，例如 {"answer":"数字","answers":["数字"]}。',
 			type: 'unknown',
@@ -1516,7 +1593,7 @@ export async function probeVisionModel(opts: AIAnswererOptions): Promise<string>
 		return '接口明确不支持图片输入，请更换模型。';
 	}
 	rememberVisionCapability(opts, 'unknown', 'probe');
-	return info?.error ? '检测未完成：' + info.error : '未能正确识别测试图片，能力仍为未知；请检查接口或手动设置。';
+	return info?.error ? '检测未完成：' + info.error : '未能正确识别测试图片，能力仍为未知；请检查接口配置或更换模型。';
 }
 
 /** Web mode uses only native page submission/retry controls and never accesses API credentials. */
@@ -1563,6 +1640,7 @@ async function queryWebAnswerer(
 			createSystemPrompt(question.type, opts.aiShowSolution),
 			createReviewHint(question.reviewAnswer),
 			createProgrammingFeedbackHint(question),
+			createProgrammingDraftHint(question),
 			'这是独立题目，请勿引用此前题目。',
 			'题型：' + getQuestionTypeLabel(question.type),
 			createChoiceOutputHint(question.type, options),

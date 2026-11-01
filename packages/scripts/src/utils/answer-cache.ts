@@ -29,6 +29,7 @@ export function questionCacheKey(opts: AIAnswererOptions, question: AIQuestionPa
 			credential: opts.aiProvider === 'deepseek-web' ? 'web-session' : md5(opts.aiApiKey || ''),
 			title: question.type === 'programming' ? question.title.replace(/\r\n?/g, '\n') : normalize(question.title),
 			type: question.type || 'unknown',
+			programmingDraft: question.type === 'programming' ? (question.programmingDraft || '').replace(/\r\n?/g, '\n') : undefined,
 			options: options.map(normalize),
 			images: question.imageUrls || [],
 			hasImage: Boolean(question.hasImage),
@@ -38,7 +39,7 @@ export function questionCacheKey(opts: AIAnswererOptions, question: AIQuestionPa
 				opts.aiProvider === 'deepseek-web' ? 'https://chat.deepseek.com' : opts.aiApiUrl.trim().replace(/\/+$/, ''),
 			model: opts.aiProvider === 'deepseek-web' ? 'web' : opts.aiModel.trim(),
 			promptVersion:
-				question.type === 'programming' ? 'programming-v2-no-comments-run-three' : 'fixed-json-v5-unlimited-output',
+				question.type === 'programming' ? 'programming-v3-complete-drafts-run-three' : 'fixed-json-v5-unlimited-output',
 			temperature: opts.aiTemperature,
 			solution: Boolean(opts.aiShowSolution),
 			format: opts.aiUseResponseFormat,

@@ -2,7 +2,7 @@
 
 ## 使用
 
-1. 更新安装构建出的 `xuexitong-ai-helper.common.user.js`，同意脚本新增的 `https://chat.deepseek.com/*` 匹配权限。学习功能仍然只匹配学习通。
+1. 更新安装构建出的 `xuexitong-ai-helper.user.js`，同意脚本新增的 `https://chat.deepseek.com/*` 匹配权限。学习功能仍然只匹配学习通。
 2. 学习通面板 → 设置 → **AI 来源：DeepSeek 网页（实验）** → **打开 DeepSeek 专用标签页**。
 3. 在该浏览器中登录 DeepSeek，使用空白新对话。可在启用前选择网页上的模型/模式；插件的 API 模型 ID、温度、token 上限和视觉配置不控制网页。
 4. 点击专用页右上角的 **启用此标签页**，回学习通开始。不要关闭专用页、在其中手动聊天或切换模型/对话。

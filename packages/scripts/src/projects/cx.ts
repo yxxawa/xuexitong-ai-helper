@@ -1,6 +1,6 @@
 import { fillStandardAnswer, fillProgrammingAnswer } from '../utils/answer-writer';
 import { programLanguage, watchProgrammingPaste, readProgrammingAnswer } from '../utils/programming';
-import { answerProgrammingQuestion, runProgrammingAnswer, programmingRunWasPassed } from '../utils/programming-runner';
+import { answerProgrammingQuestion, runProgrammingAnswer } from '../utils/programming-runner';
 import { registerAnswerReview } from '../utils/answer-review';
 import { questionCacheKey } from '../utils/answer-cache';
 import { readPageAnswer } from '../utils/answer-input';
@@ -801,8 +801,12 @@ function searchCXQuestion(
 	if (question.type === 'programming') {
 		const draft = readProgrammingAnswer(ctx.root, $gm.unsafeWindow) || '';
 		programmingDrafts.set(ctx, draft);
-		// Nonempty code is a draft, not proof that this question has been completed.
-		if (!forceProgrammingAnswer && draft) question.programmingDraft = draft;
+		if (!forceProgrammingAnswer && draft)
+			return [{
+				name: '页面已有代码（先运行验证）',
+				data: { existing_program: true },
+				results: [{ question: question.title, answer: draft }]
+			}];
 	}
 	const { title, ...details } = question;
 	return CommonProject.scripts.apps.methods.searchAnswerInCaches(title, {
@@ -825,7 +829,7 @@ async function answerCXProgrammingQuestion(
 		programmingDrafts.has(ctx) &&
 		(readProgrammingAnswer(ctx.root, $gm.unsafeWindow) || '') !== programmingDrafts.get(ctx)
 	)
-		throw new Error('请求 AI 期间程序代码已被手动修改，已保留当前代码；请重新读取本题后继续。');
+		throw new Error('处理程序题期间代码已被手动修改，已保留当前代码；请重新读取本题后继续。');
 	const config = { ...providerConfig, webActivityId };
 	const assertCurrent = () => {
 		if (!ctx.root.isConnected || JSON.stringify(describeCXQuestion(ctx, transform)) !== JSON.stringify(question))
@@ -833,6 +837,7 @@ async function answerCXProgrammingQuestion(
 	};
 	return answerProgrammingQuestion(ctx, {
 		question,
+		existingAnswer: ctx.searchInfos.some(info => info.data?.existing_program) ? programmingDrafts.get(ctx) : undefined,
 		pageWindow: $gm.unsafeWindow,
 		correct(payload) {
 			assertCurrent();
@@ -918,7 +923,8 @@ function prepareCXQuestion(
 		}
 	});
 	const existing = snapshot();
-	return existing.answer && (initial.type !== 'programming' || programmingRunWasPassed(ctx.root, existing.answer))
+	// Always run an existing program again for this attempt instead of trusting stored completion flags.
+	return existing.answer && initial.type !== 'programming'
 		? { title: existing.question.title, answer: existing.answer } : undefined;
 }
 

@@ -39,7 +39,7 @@ export function questionCacheKey(opts: AIAnswererOptions, question: AIQuestionPa
 				opts.aiProvider === 'deepseek-web' ? 'https://chat.deepseek.com' : opts.aiApiUrl.trim().replace(/\/+$/, ''),
 			model: opts.aiProvider === 'deepseek-web' ? 'web' : opts.aiModel.trim(),
 			promptVersion:
-				question.type === 'programming' ? 'programming-v3-complete-drafts-run-three' : 'fixed-json-v5-unlimited-output',
+				question.type === 'programming' ? 'programming-v4-run-existing-first' : 'fixed-json-v5-unlimited-output',
 			temperature: opts.aiTemperature,
 			solution: Boolean(opts.aiShowSolution),
 			format: opts.aiUseResponseFormat,

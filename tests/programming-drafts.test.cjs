@@ -16,13 +16,15 @@ function setup(t, options = {}) {
   const env = domRuntime(html, 'https://mooc1.chaoxing.com/mooc2/work/dowork');
   t.after(() => env.window.close());
   const clock = new Clock(), root = env.document.querySelector('.questionLi'), wrapper = root.querySelector('.CodeMirror');
-  const backing = root.querySelector('.code-editor'), queries = [], runs = [], tasks = [], messages = [];
+  const backing = root.querySelector('.code-editor'), queries = [], corrections = [], runs = [], writes = [], tasks = [], messages = [];
   let source = options.source ?? draft, workerOptions;
   const editor = { getValue: () => source, getOption: () => false, getTextArea: () => backing,
-    setValue: value => { source = value; }, save: () => { backing.value = source; } };
+    setValue: value => { writes.push(value); source = value; }, save: () => { backing.value = source; } };
   wrapper.CodeMirror = editor; env.window.codeEditors = { 1: editor };
-  root.querySelector('#runBtn').onclick = () => { runs.push(source); clock.setTimeout(() => {
-    root.querySelector('#output').innerHTML = '<textarea class="runResult result_right">全部测试用例通过</textarea>';
+  root.querySelector('#runBtn').onclick = () => { runs.push(source); const attempt=runs.length; clock.setTimeout(() => {
+    if(options.noOutput)return;
+    const passed=options.alwaysFail?false:source===complete;
+    root.querySelector('#output').innerHTML = '<textarea class="runResult '+(passed?'result_right':'result_wrong')+'">'+(passed?'全部测试用例通过':'输出不符：程序未输出输入值的两倍')+'</textarea>';
   }, 10); };
   const globals = { ...env.globals, ...clock.globals(), top: env.window, AbortController, queueMicrotask };
   const noop = () => {};
@@ -53,41 +55,64 @@ function setup(t, options = {}) {
     }, updateReviewedCache: noop, removeFailedProgramCache: noop } },
     workResults: { cfg: {}, methods: { init: noop, getResults: async () => [], setResults: async () => {}, updateWorkStateByResults: noop } }
   } } };
-  stubs['../utils/ai'] = { queryAIAnswerer: async () => info(complete), hasAnswerProvider: () => true };
+  stubs['../utils/ai'] = { queryAIAnswerer: async (config,payload) => {
+    corrections.push(plain(payload));
+    return options.correct ? options.correct({payload,editor,clock}) : info(complete);
+  }, hasAnswerProvider: () => true };
   const api = loadTS('packages/scripts/src/projects/cx.ts', globals, stubs);
   const defaults = { aiProvider: 'api', aiApiUrl: 'https://model.example.test/v1', aiApiKey: 'fixture', aiModel: 'fixture',
     aiTemperature: 0, aiUseResponseFormat: false, thread: 1, period: 0, redundanceWordsText: '', answerSeparators: '#', answerMatchMode: 'similar' };
-  return { ...env, clock, root, editor, queries, runs, tasks, messages, api, async start(changes = {}) {
+  return { ...env, clock, root, editor, queries, corrections, runs, writes, tasks, messages, api, async start(changes = {}) {
     await api.CXProject.scripts.work.oncomplete.call(api.CXProject.scripts.work);
     const worker = workerOptions.workerProvider({ ...defaults, ...changes });
-    await clock.advance(1000);
+    await clock.advance(options.advanceMs || 1000);
     return { worker, results: await tasks[tasks.length - 1] };
   } };
 }
-test('a syntactically valid half-written program and an old green output request AI completion before running', async t => {
-  const e = setup(t), { results } = await e.start();
-  assert.equal(e.queries.length, 1); assert.equal(e.queries[0].programmingDraft, draft);
-  assert.match(e.queries[0].title, /Python 3\.6\.9/);
-  assert.deepEqual(e.runs, [complete]); assert.equal(e.editor.getValue(), complete);
-  assert.equal(results[0].result.finish, true); assert.notEqual(results[0].result.preAnswered, true);
+test('an existing correct program runs once without querying AI or rewriting the editor', async t => {
+  const e=setup(t,{source:complete}),{results}=await e.start();
+  assert.equal(e.queries.length,0);assert.equal(e.corrections.length,0);assert.deepEqual(e.writes,[]);
+  assert.deepEqual(e.runs,[complete]);assert.equal(e.editor.getValue(),complete);
+  assert.equal(results[0].result.finish,true);assert.equal(results[0].result.preAnswered,true);assert.equal(results[0].result.programmingAttempts,1);
 });
-test('starting again skips only the unchanged program verified after AI completion, and edited drafts run through AI again', async t => {
-  const e = setup(t); await e.start();
-  const second = await e.start(); assert.equal(second.results[0].result.preAnswered, true);
-  assert.equal(e.queries.length, 1); assert.equal(e.runs.length, 1);
-  e.editor.setValue('value = int(input())\nprint(value)\n');
-  const third = await e.start(); assert.equal(e.queries.length, 2); assert.equal(e.runs.length, 2);
-  assert.notEqual(third.results[0].result.preAnswered, true); assert.equal(third.results[0].result.finish, true);
+test('an existing incomplete program runs first, then sends the full question, source and fresh error for correction', async t => {
+  const e=setup(t),{results}=await e.start();
+  assert.equal(e.queries.length,0);assert.equal(e.corrections.length,1);assert.match(e.corrections[0].title,/Python 3\.6\.9/);
+  assert.equal(e.corrections[0].programmingFeedback.answer,draft);assert.match(e.corrections[0].programmingFeedback.output,/输出不符/);
+  assert.equal(e.corrections[0].programmingFeedback.attempt,1);
+  assert.deepEqual(e.runs,[draft,complete]);assert.deepEqual(e.writes,[complete]);
+  assert.equal(results[0].result.finish,true);assert.equal(results[0].result.programmingAttempts,2);assert.equal(results[0].result.preAnswered,false);
 });
-test('an empty program still obtains a complete AI answer and explicit redo discards draft reuse', async t => {
-  const empty = setup(t, { source: '' }); await empty.start();
-  assert.equal(empty.queries.length, 1); assert.equal(empty.queries[0].programmingDraft, undefined);
-  const e = setup(t); await e.start({ forceAnswer: true });
-  assert.equal(e.queries.length, 1); assert.equal(e.queries[0].programmingDraft, undefined); assert.deepEqual(e.runs, [complete]);
+test('starting again tests the current saved code once more, and edited failing code is corrected only after a new run', async t => {
+  const e=setup(t,{source:complete});await e.start();await e.start();
+  assert.equal(e.queries.length,0);assert.equal(e.corrections.length,0);assert.deepEqual(e.runs,[complete,complete]);assert.deepEqual(e.writes,[]);
+  const edited='value = int(input())\nprint(value)\n';e.editor.setValue(edited);
+  const third=await e.start();assert.equal(e.corrections.length,1);assert.equal(e.runs[2],edited);assert.equal(e.runs[3],complete);
+  assert.equal(third.results[0].result.finish,true);
 });
-test('manual edits while the initial completion request is pending are kept and not marked finished', async t => {
-  const e = setup(t, { query: ({ editor }) => { editor.setValue('print("manual edit")\n'); return info(complete); } });
-  const { results } = await e.start();
-  assert.equal(e.editor.getValue(), 'print("manual edit")\n'); assert.equal(e.runs.length, 0);
-  assert.equal(results[0].result?.finish, false); assert.match(results[0].error, /手动修改/);
+test('an empty editor follows the usual AI answer flow, while explicit redo still requests a new answer', async t => {
+  const empty=setup(t,{source:''});await empty.start();
+  assert.equal(empty.queries.length,1);assert.equal(empty.corrections.length,0);assert.deepEqual(empty.runs,[complete]);
+  const redo=setup(t,{source:complete});await redo.start({forceAnswer:true});
+  assert.equal(redo.queries.length,1);assert.deepEqual(redo.writes,[complete]);assert.equal(redo.corrections.length,0);
+});
+test('manual edits while the initial answer request is pending are preserved', async t => {
+  const e=setup(t,{source:'',query:({editor})=>{editor.setValue('print("manual edit")\n');return info(complete);}});
+  const {results}=await e.start();assert.equal(e.editor.getValue(),'print("manual edit")\n');assert.equal(e.runs.length,0);
+  assert.equal(results[0].result.finish,false);assert.match(results[0].error,/手动修改/);
+});
+test('manual edits during correction cannot be overwritten by an answer to an earlier failed program', async t => {
+  const e=setup(t,{correct:({editor})=>{editor.setValue('print("manual edit")\n');return info(complete);}});
+  const {results}=await e.start();assert.equal(e.editor.getValue(),'print("manual edit")\n');assert.deepEqual(e.runs,[draft]);
+  assert.equal(results[0].result.finish,false);assert.match(results[0].error,/代码已变化/);
+});
+test('three failing runs of an existing program mean only two AI corrections and no successful completion', async t => {
+  const e=setup(t,{alwaysFail:true}),{results}=await e.start();
+  assert.equal(e.queries.length,0);assert.equal(e.corrections.length,2);assert.equal(e.runs.length,3);assert.equal(e.writes.length,2);
+  assert.equal(results[0].result.finish,false);assert.equal(results[0].result.programmingAttempts,3);assert.match(results[0].error,/3 次仍未通过/);
+});
+test('an existing program with stale green output is not accepted when its new run returns nothing', async t => {
+  const e=setup(t,{source:complete,noOutput:true,advanceMs:61000}),{results}=await e.start();
+  assert.equal(e.queries.length,0);assert.equal(e.corrections.length,0);assert.deepEqual(e.writes,[]);assert.deepEqual(e.runs,[complete]);
+  assert.equal(results[0].result.finish,false);assert.match(results[0].error,/超时/);
 });

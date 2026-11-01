@@ -91,6 +91,8 @@ export async function runProgrammingAnswer(
 }
 
 export interface ProgrammingAnswerOptions {
+	/** Existing user code is tested verbatim before any write or AI request. */
+	existingAnswer?: string;
 	question: AIQuestionPayload;
 	pageWindow?: ProgramPageWindow;
 	correct(question: AIQuestionPayload): Promise<SearchInformation[]>;
@@ -127,9 +129,15 @@ export async function answerProgrammingQuestion(
 	};
 	for (let attempt = 1; attempt <= MAX_PROGRAM_RUNS; attempt++) {
 		await waitForAI(ctx);
-		const filled = await fillProgrammingAnswer(ctx, options.pageWindow);
-		if (!filled.finish) return skip('程序题未取得完整代码，已跳过。');
-		const answer = readProgrammingAnswer(ctx.root, options.pageWindow)!;
+		const existing = attempt === 1 ? options.existingAnswer : undefined;
+		if (existing !== undefined) {
+			if (!existing.trim() || !ctx.root.isConnected || readProgrammingAnswer(ctx.root, options.pageWindow) !== existing)
+				throw new Error('已有程序代码已变化，已保留当前代码，请重新读取本题。');
+		} else {
+			const filled = await fillProgrammingAnswer(ctx, options.pageWindow);
+			if (!filled.finish) return skip('程序题未取得完整代码，已跳过。');
+		}
+		const answer = existing ?? readProgrammingAnswer(ctx.root, options.pageWindow)!;
 		options.onProgress?.('正在运行程序（' + attempt + '/' + MAX_PROGRAM_RUNS + '）…', 'running');
 		const result = await (options.run || runProgrammingAnswer)(ctx.root, answer, ctx, options.pageWindow);
 		await waitForAI(ctx);
@@ -141,7 +149,7 @@ export async function answerProgrammingQuestion(
 			validated.set(ctx.root, fingerprint(ctx.root, answer));
 			await options.onPassed?.(ctx.searchInfos);
 			options.onProgress?.('程序运行通过（' + attempt + '/' + MAX_PROGRAM_RUNS + '）', 'passed');
-			return { finish: true, programmingAttempts: attempt, programmingOutput: result.output };
+			return { finish: true, preAnswered: existing !== undefined, programmingAttempts: attempt, programmingOutput: result.output };
 		}
 		if (!result.retryable) return skip(result.output);
 		if (attempt === MAX_PROGRAM_RUNS)

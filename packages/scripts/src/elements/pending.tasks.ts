@@ -1,16 +1,38 @@
 import { resolveDesktopTaskURL } from '../utils/pending-task-navigation';
 import { scanPendingTaskSummary } from '../utils/pending-task-summary';
 import {
+	completeTaskReport,
+	pendingTaskCacheScope,
+	readPendingTaskCache,
+	samePendingTask,
+	sameTaskReport,
+	writePendingTaskCache
+} from '../utils/pending-task-cache';
+import {
 	scanPendingTasks,
 	formatTaskRemaining,
 	taskRemaining,
 	taskURL,
 	TaskVerificationRequired,
-	type PendingTask,
-	type TaskScanReport
+	type PendingTask
 } from '../utils/pending-tasks';
 
-let lastReport: TaskScanReport | undefined;
+let cachedPanel:
+	| {
+			root: HTMLElement;
+			scan: typeof scanPendingTaskSummary;
+			completeScan: typeof scanPendingTasks;
+			scope: string;
+			activate: () => void;
+	  }
+	| undefined;
+const dateTime = new Intl.DateTimeFormat('zh-CN', {
+	timeZone: 'Asia/Shanghai',
+	hour12: false,
+	dateStyle: 'short',
+	timeStyle: 'medium'
+});
+const courseNames = new Intl.Collator('zh-CN');
 let disposeCurrentPanel: (() => void) | undefined;
 const kindNames = { work: '作业', exam: '考试', review: '互评' };
 function element<K extends keyof HTMLElementTagNameMap>(tag: K, text = '', className = '') {
@@ -26,16 +48,27 @@ function link(text: string, url: string, className = '') {
 	node.rel = 'noopener noreferrer';
 	return node;
 }
-/** A user-opened view; no background course scans, task submissions, or exam starts. */
+/** Reuse the cached view and revalidate summaries only while the panel is open. */
 export function createPendingTasksPanel(scan = scanPendingTaskSummary, completeScan = scanPendingTasks) {
 	disposeCurrentPanel?.();
+	const scope = pendingTaskCacheScope();
+	if (cachedPanel?.scope === scope && cachedPanel.scan === scan && cachedPanel.completeScan === completeScan) {
+		cachedPanel.activate();
+		return cachedPanel.root;
+	}
 	const root = element('section', '', 'pending-tasks');
-	let report = lastReport,
+	let report = readPendingTaskCache(scope),
 		controller: AbortController | undefined,
-		disposed = false;
+		disposed = true;
+	let interval: ReturnType<typeof setInterval> | undefined;
+	let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+	const rows = new Map<string, { task: PendingTask; row: HTMLElement; time: HTMLElement }>();
 	let active = 'all';
 	let scanError = '';
-	const openings = new Map<string, { controller: AbortController; popup: Window }>();
+	let foregroundScan = false;
+	let needsRender = false;
+	let activation = 0;
+	const openings = new Map<string, { controller: AbortController; popup: Window; node: HTMLAnchorElement }>();
 	const heading = element('div', '', 'pending-task-head');
 	const title = element('div');
 	title.append(element('h3', '待办作业与考试'), link('学习通个人空间', 'https://i.chaoxing.com/'));
@@ -113,7 +146,7 @@ export function createPendingTasksPanel(scan = scanPendingTaskSummary, completeS
 			popup.document.title = '正在打开电脑端作业';
 			popup.document.body.textContent = '正在获取电脑端作业入口，请稍候…';
 			const current = new AbortController();
-			openings.set(task.id, { controller: current, popup });
+			openings.set(task.id, { controller: current, popup, node });
 			node.setAttribute('aria-busy', 'true');
 			navigation.hidden = false;
 			navigation.textContent = '正在获取“' + task.title + '”的电脑端入口…';
@@ -133,8 +166,10 @@ export function createPendingTasksPanel(scan = scanPendingTaskSummary, completeS
 						link('打开电脑端课程，手动选择作业', task.course.url)
 					);
 			} finally {
-				openings.delete(task.id);
-				node.removeAttribute('aria-busy');
+				if (openings.get(task.id)?.controller === current) {
+					openings.delete(task.id);
+					node.removeAttribute('aria-busy');
+				}
 			}
 		};
 		return node;
@@ -154,14 +189,11 @@ export function createPendingTasksPanel(scan = scanPendingTaskSummary, completeS
 		main.append(meta);
 		if (task.tip) main.append(element('p', task.tip, 'pending-task-tip secondary'));
 		const side = element('div', '', 'pending-task-side');
-		const remaining = taskRemaining(task);
-		const time = element('strong', formatTaskRemaining(task), 'pending-task-time');
-		if (task.state !== 'expired' && remaining !== undefined && remaining < 86400000) time.classList.add('urgent');
-		if (remaining === undefined) time.classList.add('unknown');
+		const time = element('strong', '', 'pending-task-time');
 		if (task.deadline !== undefined)
 			time.title =
 				'截止：' +
-				new Date(task.deadline).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) +
+				dateTime.format(task.deadline) +
 				'（北京时间）';
 		else time.title = task.timeText;
 		side.append(
@@ -180,7 +212,21 @@ export function createPendingTasksPanel(scan = scanPendingTaskSummary, completeS
 			)
 		);
 		row.append(main, side);
-		return row;
+		const entry = { task, row, time };
+		rows.set(task.id, entry);
+		return entry;
+	}
+	function updateRemaining() {
+		if (disposed) return;
+		const now = Date.now();
+		for (const { task, row, time } of rows.values()) {
+			if (row.parentNode !== list) continue;
+			const text = formatTaskRemaining(task, now);
+			if (time.textContent !== text) time.textContent = text;
+			const remaining = taskRemaining(task, now);
+			time.classList.toggle('urgent', task.state !== 'expired' && remaining !== undefined && remaining < 86400000);
+			time.classList.toggle('unknown', remaining === undefined);
+		}
 	}
 	function render() {
 		if (disposed) return;
@@ -198,7 +244,7 @@ export function createPendingTasksPanel(scan = scanPendingTaskSummary, completeS
 			button.setAttribute('aria-pressed', String(key === active));
 		}
 		const selected = subject.value;
-		const courses = [...new Set(tasks.map((task) => task.course.name))].sort((a, b) => a.localeCompare(b, 'zh-CN'));
+		const courses = [...new Set(tasks.map((task) => task.course.name))].sort(courseNames.compare);
 		if (JSON.stringify(courses) !== subject.dataset.courses) {
 			subject.replaceChildren(element('option', '全部科目'));
 			for (const name of courses) {
@@ -220,16 +266,27 @@ export function createPendingTasksPanel(scan = scanPendingTaskSummary, completeS
 		);
 		visible.sort((a, b) =>
 			sort.value === 'course'
-				? a.course.name.localeCompare(b.course.name, 'zh-CN')
+				? courseNames.compare(a.course.name, b.course.name)
 				: (taskRemaining(a) ?? Infinity) - (taskRemaining(b) ?? Infinity)
 		);
-		list.replaceChildren(...visible.map(renderTask));
+		const nextRows = visible.map((task) => {
+			const cached = rows.get(task.id);
+			if (cached && samePendingTask(cached.task, task)) return cached.row;
+			return renderTask(task).row;
+		});
+		for (const [index, row] of nextRows.entries()) {
+			if (list.children[index] !== row) list.insertBefore(row, list.children[index] || null);
+		}
+		while (list.children.length > nextRows.length) list.lastElementChild?.remove();
+		const ids = new Set(tasks.map((task) => task.id));
+		for (const id of rows.keys()) if (!ids.has(id)) rows.delete(id);
+		updateRemaining();
 		empty.hidden = Boolean(visible.length);
 		empty.textContent = scanError
 			? '本次读取失败，请检查登录状态后刷新。'
 			: !report
 			? '点击“刷新待办”，读取当前登录账号的课程。'
-			: controller
+			: foregroundScan
 			? '正在读取课程列表…'
 			: report.errors.length || report.cancelled
 			? '当前结果不完整，请查看读取状态或重新刷新。'
@@ -245,7 +302,7 @@ export function createPendingTasksPanel(scan = scanPendingTaskSummary, completeS
 				? ' · 读取已停止，结果不完整'
 				: '';
 			status.textContent =
-				(controller ? '正在读取 ' : '已读取 ') +
+				(foregroundScan ? '正在读取 ' : '已读取 ') +
 				report.completedCourses +
 				'/' +
 				report.courseCount +
@@ -257,12 +314,12 @@ export function createPendingTasksPanel(scan = scanPendingTaskSummary, completeS
 				incomplete;
 			footer.textContent =
 				'读取于 ' +
-				new Date(report.fetchedAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) +
-				'（北京时间）。列表状态为本次读取结果；完成后可刷新。';
+				dateTime.format(report.fetchedAt) +
+				'（北京时间）。剩余时间实时计算；重新打开时自动核对更新。';
 		}
 		if (report?.source === 'summary')
 			status.textContent =
-				(controller ? '正在读取汇总' : '已读取汇总') +
+				(foregroundScan ? '正在读取汇总' : '已读取汇总') +
 				' · 范围内 ' +
 				report.courseCount +
 				' 门课 · ' +
@@ -284,33 +341,57 @@ export function createPendingTasksPanel(scan = scanPendingTaskSummary, completeS
 			failures.append(item);
 		}
 	}
-	async function refreshTasks(full = false) {
-		if (controller || disposed) return;
+	async function refreshTasks(full = false, silent = false) {
+		if (disposed || (controller && (silent || foregroundScan))) return;
+		controller?.abort();
+		if (refreshTimer !== undefined) clearTimeout(refreshTimer);
+		refreshTimer = undefined;
 		const current = (controller = new AbortController());
-		scanError = '';
-		refresh.disabled = complete.disabled = true;
-		stop.hidden = false;
-		status.textContent = '正在读取当前登录账号的课程…';
+		silent = silent && Boolean(report);
+		foregroundScan = !silent;
+		const previousError = scanError;
+		if (!silent) {
+			scanError = '';
+			refresh.disabled = complete.disabled = true;
+			stop.hidden = false;
+			status.textContent = '正在读取当前登录账号的课程…';
+		}
+		let changed = false;
 		try {
 			const result = await (full ? completeScan : scan)({
 				signal: current.signal,
 				onProgress: (progress) => {
-					if (disposed || current !== controller) return;
-					report = progress;
-					render();
+					if (disposed || current !== controller || silent) return;
+					status.textContent =
+						'正在读取 ' + progress.completedCourses + '/' + progress.courseCount + ' 门课程，' + progress.pagesRead + ' 页…';
 				}
 			});
-			if (disposed) return;
-			report = lastReport = result;
+			if (disposed || current !== controller) return;
+			if (current.signal.aborted || result.cancelled) scanError = '已停止读取待办。';
+			else if (report && !completeTaskReport(result))
+				scanError = result.verificationUrl
+					? '平台要求验证码，请到学习通完成验证后刷新。'
+					: '本次读取不完整：' + result.errors.map((error) => error.message).join('；');
+			else {
+				scanError = '';
+				if (!report || !sameTaskReport(report, result)) {
+					report = result;
+					changed = true;
+					writePendingTaskCache(scope, result);
+				}
+			}
 		} catch (error) {
-			if (disposed) return;
+			if (disposed || current !== controller) return;
 			scanError = current.signal.aborted ? '已停止读取待办。' : '读取失败：' + String((error as any)?.message || error);
 		} finally {
-			if (controller === current) controller = undefined;
-			refresh.disabled = complete.disabled = false;
-			stop.hidden = true;
+			if (current === controller) {
+				controller = undefined;
+				foregroundScan = false;
+				refresh.disabled = complete.disabled = false;
+				stop.hidden = true;
+			}
 		}
-		render();
+		if (!disposed && (!silent || changed || scanError || previousError)) render();
 	}
 	refresh.onclick = () => {
 		void refreshTasks();
@@ -321,29 +402,59 @@ export function createPendingTasksPanel(scan = scanPendingTaskSummary, completeS
 	stop.onclick = () => controller?.abort();
 	search.oninput = render;
 	subject.onchange = sort.onchange = render;
-	const interval = setInterval(render, 60000);
 	const observer = new MutationObserver(() => {
 		if (!root.isConnected) dispose();
 	});
 	function dispose() {
 		if (disposed) return;
 		disposed = true;
+		needsRender = foregroundScan;
+		foregroundScan = false;
 		controller?.abort();
-		for (const { controller, popup } of openings.values()) {
+		controller = undefined;
+		refresh.disabled = complete.disabled = false;
+		stop.hidden = true;
+		if (openings.size) {
+			navigation.hidden = true;
+			navigation.textContent = '';
+		}
+		for (const { controller, popup, node } of openings.values()) {
 			controller.abort();
+			node.removeAttribute('aria-busy');
 			if (!popup.closed) popup.close();
 		}
 		openings.clear();
 		clearInterval(interval);
+		clearTimeout(refreshTimer);
+		interval = refreshTimer = undefined;
 		observer.disconnect();
 		window.removeEventListener('pagehide', dispose);
 		if (disposeCurrentPanel === dispose) disposeCurrentPanel = undefined;
 	}
-	disposeCurrentPanel = dispose;
-	window.addEventListener('pagehide', dispose);
-	queueMicrotask(() => {
-		if (root.isConnected) observer.observe(root.getRootNode(), { childList: true, subtree: true });
-	});
+	function activate() {
+		const generation = ++activation;
+		disposed = false;
+		disposeCurrentPanel = dispose;
+		if (needsRender) render();
+		needsRender = false;
+		updateRemaining();
+		interval = setInterval(updateRemaining, 1000);
+		window.addEventListener('pagehide', dispose);
+		queueMicrotask(() => {
+			if (disposed || generation !== activation || !root.isConnected) return;
+			// Observe removals of this panel and its ancestors, not every task/countdown mutation.
+			for (let parent = root.parentNode; parent; parent = parent.parentNode || (parent as ShadowRoot).host || null)
+				observer.observe(parent, { childList: true });
+			if (controller) return;
+			refreshTimer = setTimeout(() => {
+				refreshTimer = undefined;
+				if (!disposed && generation === activation && root.isConnected) void refreshTasks(false, true);
+			}, 0);
+		});
+	}
+	cachedPanel = { root, scan, completeScan, scope, activate };
+	disposed = false;
 	render();
+	activate();
 	return root;
 }

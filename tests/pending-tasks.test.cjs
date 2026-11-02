@@ -178,7 +178,7 @@ function panelSetup(t, scan) {
   const click = text => [...root.querySelectorAll('button')].find(button => button.textContent === text).click();
   return { ...e, root, createPendingTasksPanel, click };
 }
-test('the real panel renders no unprompted scan, filters by subject and type, and safely displays literal task text', async t => {
+test('the panel defers its initial read, filters by subject and type, and safely displays literal task text', async t => {
   let calls = 0;
   const tasks = [pendingTask(1, { title: '<img src=x onerror=alert(1)>', remainingUntil: 100000 + 3600000 }),
     pendingTask(2, { kind: 'exam', status: '待做', course: course(2, '另一门课') }),
@@ -211,9 +211,9 @@ test('stopping, detaching, and replacing a panel abort its scan and release its 
   assert.equal(signal.aborted, true); assert.equal(e.root.querySelector('button').disabled, false);
   e.click('刷新待办'); await e.clock.flush(); const running = signal;
   e.root.remove(); await e.clock.flush(); assert.equal(running.aborted, true); assert.equal(e.clock.timers.size, 0);
-  const next = e.createPendingTasksPanel(async () => report()); e.document.body.append(next); await e.clock.flush();
+  const next = e.createPendingTasksPanel(async () => report()); e.document.body.append(next); await e.clock.advance(0);
   assert.equal(e.clock.timers.size, 1); const replacement = e.createPendingTasksPanel(async () => report()); e.document.body.append(replacement);
-  await e.clock.flush(); assert.equal(e.clock.timers.size, 1);
+  await e.clock.advance(0); assert.equal(e.clock.timers.size, 1);
   e.window.dispatchEvent(new e.window.Event('pagehide')); assert.equal(e.clock.timers.size, 0);
 });
 test('dynamic catalogs use the native all-term student list and also include courses inside folders', async t => {

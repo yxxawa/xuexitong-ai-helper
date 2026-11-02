@@ -92,7 +92,10 @@ export class CourseWorker<E extends RawElements = RawElements> extends CommonEve
 			const ctx: WorkContext<E> = {
 				isCancelled: () => this.isClose,
 				isPaused: () => this.isStop,
-				waitUntilReady: () => this.waitUntilReady(),
+				waitUntilReady: async () => {
+					await this.waitUntilReady();
+					ctx.assertCurrentQuestion?.();
+				},
 				searchInfos: [],
 				root,
 				elements: domSearchAll<E>(this.opts.elements, root),
@@ -103,6 +106,7 @@ export class CourseWorker<E extends RawElements = RawElements> extends CommonEve
 			const result: WorkResult<E> = { requested: false, resolved: false, ctx };
 			try {
 				await this.opts.onElementSearched?.(ctx.elements, root);
+				ctx.elements = domSearchAll<E>(this.opts.elements, root);
 				ctx.elements.title = ctx.elements.title?.filter(Boolean) as HTMLElement[];
 				ctx.elements.options = ctx.elements.options?.filter(Boolean) as HTMLElement[];
 				if (typeof this.opts.work === 'object') {
@@ -207,6 +211,7 @@ export class CourseWorker<E extends RawElements = RawElements> extends CommonEve
 				const ctx = result.ctx!;
 				try {
 					if (result.error) throw new Error(result.error);
+					await ctx.waitUntilReady?.();
 					const infos = ctx.searchInfos.filter(
 						(info) => !info.error && !(info.data as any)?.skipped && info.results.some((r) => r.answer?.trim())
 					);

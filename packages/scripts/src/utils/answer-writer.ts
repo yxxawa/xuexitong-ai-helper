@@ -31,7 +31,7 @@ export async function fillStandardAnswer(
 		);
 	};
 	if (
-		writes.some(({ option, answer }) => !writable(option) || !answer.trim()) ||
+		writes.some(({ option, answer }) => !writable(option) || (type === 'completion' && !answer.trim())) ||
 		(type === 'completion' && writes.length !== options.length)
 	)
 		return { finish: false };
@@ -39,6 +39,7 @@ export async function fillStandardAnswer(
 	if (selected.has(-1)) return { finish: false };
 	const ready = async (option: HTMLElement) => {
 		await ctx.waitUntilReady?.();
+		ctx.assertCurrentQuestion?.();
 		if (ctx.isCancelled?.()) throw new Error('答题已取消');
 		if (!writable(option)) throw new Error('答题控件已变化或不可编辑，请重新读取题目。');
 	};

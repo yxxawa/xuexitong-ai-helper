@@ -38,7 +38,7 @@ function setup(t, options = {}) {
   class Worker extends actualWorker { doWork(opts) { const task = super.doWork(opts); tasks.push(task); return task; } }
   const stubs = {};
   for (const match of fs.readFileSync(path.join(ROOT, 'packages/scripts/src/projects/cx.ts'), 'utf8').matchAll(/from ['"]([^'"]+)['"]/g)) stubs[match[1]] = {};
-  for (const name of ['../utils/answer-writer','../utils/programming','../utils/programming-runner','../utils/answer-input','../utils/question','../utils/cx-question']) delete stubs[name];
+  for (const name of ['../utils/answer-writer','../utils/programming','../utils/programming-runner','../utils/answer-input','../utils/question','../utils/cx-question','../utils/question-guard','@xuexitong-ai-helper/core/src/core/utils/dom']) delete stubs[name];
   class Script { constructor(opts) { Object.assign(this, opts); this.cfg = Object.fromEntries(Object.entries(opts.configs || {}).map(([key, config]) => [key, config.defaultValue])); } }
   const h = tag => env.document.createElement(tag);
   stubs['easy-us'] = { ...easy, Project: { create: value => value }, Script, h, $gm: { unsafeWindow: env.window },
@@ -70,7 +70,8 @@ function setup(t, options = {}) {
   return { ...env, clock, root, editor, queries, corrections, runs, writes, tasks, messages, notifications, api, async start(changes = {}) {
     await api.CXProject.scripts.work.oncomplete.call(api.CXProject.scripts.work);
     const worker = workerOptions.workerProvider({ ...defaults, ...changes });
-    await clock.advance(options.advanceMs || 1000);
+    for (let tick = 0; tick < 8 && worker.isRunning; tick++) await clock.advance(options.advanceMs || 1000);
+    assert.equal(worker.isRunning, false, 'the program attempt must settle within its simulated run budget');
     return { worker, results: await tasks[tasks.length - 1] };
   } };
 }

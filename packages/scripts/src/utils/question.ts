@@ -19,6 +19,40 @@ export function getQuestionImageURL(img: HTMLImageElement): string {
 	return '';
 }
 
+const NON_QUESTION_CONTENT = [
+	'head',
+	'script',
+	'style',
+	'template',
+	'noscript',
+	'[hidden]',
+	'[aria-hidden="true"]',
+	'[data-xth-image-ref]',
+	'.edui-editor-toolbarbox',
+	'.edui-toolbar',
+	'[role="toolbar"]',
+	'.CodeMirror',
+	'.ace_editor',
+	'.monaco-editor',
+	'.xth-programming-run-note',
+	'.xth-answer-review'
+].join(',');
+
+/** Ignore hidden templates and editor chrome, including visibility inherited from an ancestor. */
+export function isQuestionContentElement(element: Element, cache = new Map<Element, boolean>()): boolean {
+	const cached = cache.get(element);
+	if (cached !== undefined) return cached;
+	const style = element.ownerDocument.defaultView?.getComputedStyle(element);
+	const visible =
+		!element.matches(NON_QUESTION_CONTENT) &&
+		style?.display !== 'none' &&
+		style?.visibility !== 'hidden' &&
+		style?.visibility !== 'collapse' &&
+		(!element.parentElement || isQuestionContentElement(element.parentElement, cache));
+	cache.set(element, visible);
+	return visible;
+}
+
 interface QuestionVisual {
 	element: Element;
 	sources: string[];
@@ -35,8 +69,9 @@ function imageURL(value: string, element: Element) {
 /** Inspect the connected source nodes: stylesheet backgrounds disappear on detached clones. */
 function questionVisuals(root: HTMLElement): QuestionVisual[] {
 	const visuals: QuestionVisual[] = [];
+	const visibility = new Map<Element, boolean>();
 	for (const element of [root, ...Array.from(root.querySelectorAll('*'))]) {
-		if (element.parentElement?.closest('svg') || element.closest('script,style,[data-xth-image-ref]')) continue;
+		if (element.parentElement?.closest('svg') || !isQuestionContentElement(element, visibility)) continue;
 		const tag = element.tagName.toUpperCase();
 		try {
 			if (tag === 'IMG')
@@ -82,10 +117,14 @@ export function collectQuestionImageUrls(...groups: (HTMLElement | undefined)[][
 	return inspectQuestionImages(...groups).imageUrls;
 }
 export function questionElementText(root: HTMLElement, imageUrls: string[]): string {
+	const visibility = new Map<Element, boolean>();
+	if (!isQuestionContentElement(root, visibility)) return '';
 	const originals = [root, ...Array.from(root.querySelectorAll('*'))];
 	const clone = root.cloneNode(true) as HTMLElement;
 	const copies = [clone, ...Array.from(clone.querySelectorAll('*'))];
 	const visuals = questionVisuals(root);
+	for (let index = 1; index < originals.length; index++)
+		if (!isQuestionContentElement(originals[index], visibility)) copies[index].remove();
 	clone.querySelectorAll<HTMLElement>('[data-xth-image-ref], span').forEach((node) => {
 		if (
 			node.hasAttribute('data-xth-image-ref') ||
@@ -109,16 +148,18 @@ export function questionElementText(root: HTMLElement, imageUrls: string[]): str
 	}
 	clone.querySelectorAll('script, style').forEach((node) => node.remove());
 	clone.querySelectorAll('br').forEach((node) => node.replaceWith(root.ownerDocument.createTextNode('\n')));
+	clone.querySelectorAll('p,div,li,pre,table,tr,td,dt,dd,h1,h2,h3,h4').forEach((node) => node.append(' '));
 	return (clone.textContent || '').replace(/\s+/g, ' ').trim();
 }
 /** Option images can be siblings of the text label; include the row only if it contains one option. */
-export function questionOptionText(option: HTMLElement, options: HTMLElement[], imageUrls: string[]): string {
+export function questionOptionRoot(option: HTMLElement, options: HTMLElement[]): HTMLElement {
 	const row = option.closest('li') || option.parentElement;
-	const source =
-		row && options.filter((item) => row.contains(item)).length === 1 && !row.querySelector('h3,.Zy_TItle')
-			? (row as HTMLElement)
-			: option;
-	return questionElementText(source, imageUrls).replace(/^[A-Z][.、．]\s*/, '');
+	return row && options.filter((item) => row.contains(item)).length === 1 && !row.querySelector('h3,.Zy_TItle')
+		? (row as HTMLElement)
+		: option;
+}
+export function questionOptionText(option: HTMLElement, options: HTMLElement[], imageUrls: string[]): string {
+	return questionElementText(questionOptionRoot(option, options), imageUrls).replace(/^[A-Z][.、．]\s*/, '');
 }
 
 export function collectGroupedOptions(groups: HTMLElement[], selector: string, imageUrls: string[]) {

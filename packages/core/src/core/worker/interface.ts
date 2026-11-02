@@ -32,6 +32,8 @@ export interface WorkContext<E> {
 	/** Wait before every page mutation; pausing must also suspend an in-flight answer. */
 	waitUntilReady?: () => Promise<void>;
 	isPaused?: () => boolean;
+	/** Validate the live question identity before applying an asynchronous answer. */
+	assertCurrentQuestion?: () => void;
 	root: HTMLElement;
 	elements: SearchedElements<E, HTMLElement[]>;
 	searchInfos: SearchInformation[];

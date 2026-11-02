@@ -3,6 +3,7 @@ import { programLanguage, watchProgrammingPaste, readProgrammingAnswer } from '.
 import { answerProgrammingQuestion, runProgrammingAnswer } from '../utils/programming-runner';
 import { registerAnswerReview } from '../utils/answer-review';
 import { questionCacheKey } from '../utils/answer-cache';
+import { createQuestionWriteGuard } from '../utils/question-guard';
 import { readPageAnswer } from '../utils/answer-input';
 import { queryAIAnswerer, type AIAnswererOptions, type AIQuestionPayload } from '../utils/ai';
 import type { WorkContext, CustomWork } from '@xuexitong-ai-helper/core/src/core/worker/interface';
@@ -14,6 +15,7 @@ import {
 	inspectQuestionImages,
 	questionElementText,
 	questionOptionText,
+	questionOptionRoot,
 	collectGroupedOptions
 } from '../utils/question';
 /** global Ext videojs getTeacherAjax jobs */
@@ -737,15 +739,17 @@ export const CXProject = Project.create({
 
 type CXTitleTransform = (titles: (HTMLElement | undefined)[], imageUrls?: string[]) => string;
 function describeCXQuestion(ctx: WorkContext<any>, titleTransform: CXTitleTransform): AIQuestionPayload {
-	const images = inspectQuestionImages([ctx.root]),
-		elements = ctx.elements as Record<string, HTMLElement[]>;
-	const title = titleTransform(elements.title || [], images.imageUrls);
+	const elements = ctx.elements as Record<string, HTMLElement[]>;
 	const type =
 		resolveQuestionType(
 			elements,
 			ctx,
 			(elements.title || []).map((el: HTMLElement) => el?.textContent || '').join(' ')
 		) || 'unknown';
+	const optionsRoots = type === 'completion' || type === 'programming' ? [] :
+		(elements.options || []).map((option) => questionOptionRoot(option, elements.options));
+	const images = inspectQuestionImages(elements.title || [], optionsRoots, elements.reading || [], elements.filling || []);
+	const title = titleTransform(elements.title || [], images.imageUrls);
 	if (['single', 'multiple', 'judgement', 'completion', 'programming'].includes(type)) ctx.type = type as typeof ctx.type;
 	const options =
 		type === 'completion' || type === 'programming'
@@ -767,6 +771,11 @@ function describeCXQuestion(ctx: WorkContext<any>, titleTransform: CXTitleTransf
 	return { title: language ? title + '\n编程语言：' + language : title, type, options, lineOptions, ...images };
 }
 const programmingDrafts = new WeakMap<WorkContext<any>, string>();
+const answerWriteChecks = new WeakMap<WorkContext<any>, () => void>();
+function assertCXAnswerUnchanged(ctx: WorkContext<any>) {
+	ctx.assertCurrentQuestion?.();
+	answerWriteChecks.get(ctx)?.();
+}
 
 function searchCXQuestion(
 	ctx: WorkContext<any>,
@@ -775,8 +784,9 @@ function searchCXQuestion(
 	webActivityId?: string,
 	forceProgrammingAnswer = false
 ) {
+	assertCXAnswerUnchanged(ctx);
 	const question = describeCXQuestion(ctx, transform);
-	if (!question.title) throw new Error('题目为空，请等待页面加载后重试。');
+	if (!question.title && !question.imageUrls?.length) throw new Error('题目为空，请等待页面加载后重试。');
 	if (question.type === 'unknown')
 		return [
 			{
@@ -869,9 +879,13 @@ function prepareCXQuestion(
 	config: AIAnswererOptions
 ) {
 	const initial = describeCXQuestion(ctx, transform);
+	const liveQuestion = () => describeCXQuestion({ ...ctx, elements: domSearchAll(worker.opts.elements, ctx.root) }, transform);
+	const guard = createQuestionWriteGuard(ctx.root, liveQuestion);
+	ctx.assertCurrentQuestion = guard.assertQuestion;
+	answerWriteChecks.set(ctx, guard.assertAnswerUnchanged);
 	const initialKey = questionCacheKey(config, initial);
 	const snapshot = () => {
-		const question = describeCXQuestion(ctx, transform);
+		const question = liveQuestion();
 		return {
 			question,
 			answer:
@@ -880,12 +894,7 @@ function prepareCXQuestion(
 	};
 	ctx.reviewId = registerAnswerReview(ctx.root, {
 		available() {
-			if (
-				!ctx.root.isConnected ||
-				(ctx.elements.title || []).some((el) => el && !ctx.root.contains(el)) ||
-				JSON.stringify(describeCXQuestion(ctx, transform)) !== JSON.stringify(initial)
-			)
-				throw new Error('原题页面已切换或题目发生变化，请重新读取后检验。');
+			guard.assertQuestion();
 			if (worker.isRunning) throw new Error('请等待自动答题结束后再检验，暂停中的任务也需要先结束。');
 		},
 		snapshot,
@@ -896,7 +905,10 @@ function prepareCXQuestion(
 				...ctx,
 				searchInfos: infos,
 				isCancelled: () => !ctx.root.isConnected || Boolean(control?.isCancelled?.()),
-				waitUntilReady: undefined,
+				waitUntilReady: async () => {
+					if (control?.isCancelled?.()) throw new Error('检验已取消。');
+					guard.assertQuestion();
+				},
 				isPaused: undefined
 			};
 			// A review accepts the proposed answer; validate that exact proposal before committing it.
@@ -998,6 +1010,8 @@ function workOrExam(
 			searchCXQuestion(ctx, workOrExamQuestionTitleTransform, providerConfig, webActivityId, Boolean(forceAnswer)),
 
 		work: async (ctx) => {
+			await ctx.waitUntilReady?.();
+			assertCXAnswerUnchanged(ctx);
 			const { elements, searchInfos } = ctx;
 			const type = resolveQuestionType(elements, ctx, elements.title.map((el) => el?.textContent || '').join(' '));
 
@@ -1208,12 +1222,12 @@ async function mappingRecognize(doc: Document = document) {
 
 	// 替换加密字体
 	secretFonts.forEach((el) => {
-		let html = el.innerHTML;
-		for (const word of mappedChars) {
-			html = html.split(word).join(match[word]);
+		const walker = doc.createTreeWalker(el, doc.defaultView!.NodeFilter.SHOW_TEXT);
+		let node: Node | null;
+		while ((node = walker.nextNode())) {
+			if (node.parentElement?.closest('script,style,textarea,[contenteditable="true"]')) continue;
+			node.nodeValue = Array.from(node.nodeValue || '').map((char) => match[char] || char).join('');
 		}
-
-		el.innerHTML = html;
 		el.classList.remove('font-cxsecret'); // 移除字体加密
 	});
 
@@ -1967,7 +1981,7 @@ const JobRunner = {
 			const worker = new CourseWorker({
 				root: TiMu,
 				elements: {
-					title: (root) => cxQuestionTitles(root, '.Zy_TItle .clearfix'),
+					title: (root) => cxQuestionTitles(root, '.Zy_TItle .clearfix', 'ul li .after,ul li textarea,ul textarea,ul li label:not(.before)'),
 					/**
 					 * 兼容各种选项
 					 *
@@ -1988,6 +2002,8 @@ const JobRunner = {
 					searchCXQuestion(ctx, chapterTestTaskQuestionTitleTransform, providerConfig, activity?.id),
 
 				work: async (ctx) => {
+					await ctx.waitUntilReady?.();
+					assertCXAnswerUnchanged(ctx);
 					const { elements, searchInfos } = ctx;
 					const type = resolveQuestionType(elements, ctx, elements.title.map((el) => el?.textContent || '').join(' '));
 
@@ -2025,6 +2041,7 @@ const JobRunner = {
 					if (curr.ctx?.isCancelled?.()) return;
 					// 没有完成时随机作答
 					if (curr.result?.finish === false && curr.resolved === true) {
+						try { if (curr.ctx) assertCXAnswerUnchanged(curr.ctx); } catch { return; }
 						if (isQuestionSkipped(curr.ctx?.searchInfos)) {
 							console.log('此题已跳过，不进行随机作答');
 							return;

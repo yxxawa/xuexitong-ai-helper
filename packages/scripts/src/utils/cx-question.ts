@@ -1,7 +1,15 @@
 import type { AILineOptionGroup } from './ai';
-import { questionElementText } from './question';
+import { isQuestionContentElement, questionElementText } from './question';
 
-export type CXQuestionType = 'single' | 'multiple' | 'judgement' | 'completion' | 'line' | 'fill' | 'reader' | 'programming';
+export type CXQuestionType =
+	| 'single'
+	| 'multiple'
+	| 'judgement'
+	| 'completion'
+	| 'line'
+	| 'fill'
+	| 'reader'
+	| 'programming';
 
 const LINE_CONTROLS = '.line_answer_ct .selectBox, .line_answer_ct select, .thirdUlList select, select.dept_select';
 const LEFT_COLUMN = '.firstUlList, .line_wid_half.fl';
@@ -14,11 +22,57 @@ export function lineSelectBoxes(root: HTMLElement | Document): HTMLElement[] {
 	);
 }
 
-/** Both columns are part of the question. Reading only h3 loses the actual matching problem. */
-export function cxQuestionTitles(root: HTMLElement | Document, titleSelector: string): HTMLElement[] {
-	const titles = Array.from(root.querySelectorAll<HTMLElement>(titleSelector));
-	const columns = Array.from(root.querySelectorAll<HTMLElement>(LEFT_COLUMN + ', ' + RIGHT_COLUMN));
-	return [...titles, ...columns.filter((column) => !titles.some((title) => title.contains(column)))];
+/** Read the stem in document order without pulling answer inputs or editor UI into the prompt. */
+export function cxQuestionTitles(
+	root: HTMLElement | Document,
+	titleSelector: string,
+	optionSelector = '.answerBg .answer_p, .textDIV, .eidtDiv'
+): HTMLElement[] {
+	const titles: HTMLElement[] = [];
+	const columns = LEFT_COLUMN + ', ' + RIGHT_COLUMN;
+	const answers = [
+		'.answerBg',
+		'.stem_answer',
+		'.mark_answer',
+		'.line_answer',
+		'.line_answer_ct',
+		'.thirdUlList',
+		'.reading_answer',
+		'.filling_answer',
+		'.proceduralQue',
+		'.textDIV',
+		'.eidtDiv',
+		'.answer_p',
+		optionSelector,
+		'.selectBoxLang',
+		'.edui-editor',
+		'input',
+		'textarea',
+		'select',
+		'button',
+		'iframe',
+		'[contenteditable="true"]'
+	].join(',');
+	const visibility = new Map<Element, boolean>();
+	const visit = (element: HTMLElement) => {
+		if (!isQuestionContentElement(element, visibility)) return;
+		if (element.matches(columns)) {
+			titles.push(element);
+			return;
+		}
+		if (element.matches(answers)) return;
+		if (element.matches(titleSelector) || !element.querySelector(answers)) {
+			titles.push(element);
+			return;
+		}
+		for (const child of Array.from(element.children)) visit(child as HTMLElement);
+	};
+	for (const child of Array.from(root.children)) visit(child as HTMLElement);
+	// Matching columns can live inside an answer container, but are still part of the stem.
+	for (const column of Array.from(root.querySelectorAll<HTMLElement>(columns)))
+		if (isQuestionContentElement(column, visibility) && !titles.some((title) => title.contains(column)))
+			titles.push(column);
+	return titles;
 }
 
 export function getQuestionType(value: number): CXQuestionType | undefined {
@@ -43,7 +97,10 @@ export function resolveQuestionType(
 	// Specific matching markup must win over generic textarea/radio heuristics.
 	if (ctx?.root && lineSelectBoxes(ctx.root).length) return 'line';
 	if (/连线题|連線題|匹配题|配对题|matching(?:\s+question)?/i.test(title)) return 'line';
-	if (ctx?.root?.querySelector('textarea.code-editor, .proceduralQue') || /程序题|编程题|programming(?: question)?/i.test(title))
+	if (
+		ctx?.root?.querySelector('textarea.code-editor, .proceduralQue') ||
+		/程序题|编程题|programming(?: question)?/i.test(title)
+	)
 		return 'programming';
 	if (ctx?.type) return ctx.type;
 	if (/判断题|true or false|对错题|判斷題/i.test(title)) return 'judgement';
@@ -84,7 +141,7 @@ function lineOptions(box: HTMLElement, imageUrls: string[]) {
 	if (box.tagName === 'SELECT') {
 		return Array.from((box as HTMLSelectElement).options)
 			.filter((option) => !option.disabled && !option.closest('optgroup[disabled]'))
-			.map((option) => ({ value: option.value, text: questionElementText(option, imageUrls) }))
+			.map((option) => ({ value: option.value, text: (option.textContent || '').trim() }))
 			.filter((option) => !isPlaceholder(option.value, option.text));
 	}
 	return Array.from(box.querySelectorAll<HTMLElement>('li[data]'))

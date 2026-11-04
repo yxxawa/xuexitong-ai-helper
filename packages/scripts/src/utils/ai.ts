@@ -45,6 +45,8 @@ export interface AIQuestionPayload {
 	type?: QuestionTypes | string;
 	options?: string[] | string;
 	lineOptions?: AILineOptionGroup[];
+	/** Number of answer fields rendered by the page, in filling order. */
+	blankCount?: number;
 	hasImage?: boolean;
 	unresolvedImageCount?: number;
 	imageUrls?: string[];
@@ -207,6 +209,7 @@ export async function queryAIAnswerer(
 		`题型：${questionTypeName}`,
 		imageUrls.length ? createImageMarkerHint(imageUrls.length) : '',
 		createChoiceOutputHint(question.type, options),
+		createCompletionOutputHint(question),
 		'题目：',
 		promptTitle,
 		isLineQuestion(question.type) && question.lineOptions?.length
@@ -807,6 +810,12 @@ function normalizeAISolution(solution: string) {
 		.replace(/[ \t]+\n/g, '\n')
 		.replace(/\n{3,}/g, '\n\n')
 		.trim();
+}
+
+function createCompletionOutputHint(question: AIQuestionPayload) {
+	const count = question.blankCount;
+	if (!isCompletionQuestion(question.type) || !Number.isInteger(count) || !count || count < 1) return '';
+	return `本题共有 ${count} 个空。题干中的 ____ 表示填空位置；请按页面顺序作答，answers 必须包含 ${count} 项，每项只填写对应空的内容，不得漏空或合并空。`;
 }
 
 function createReviewHint(answer?: string) {
@@ -1644,6 +1653,7 @@ async function queryWebAnswerer(
 			'这是独立题目，请勿引用此前题目。',
 			'题型：' + getQuestionTypeLabel(question.type),
 			createChoiceOutputHint(question.type, options),
+			createCompletionOutputHint(question),
 			'题目：',
 			replaceImageUrlsWithMarkers(question.title, imageUrls) || '见图片',
 			imageUrls.length

@@ -26,7 +26,6 @@ const NON_QUESTION_CONTENT = [
 	'template',
 	'noscript',
 	'[hidden]',
-	'[aria-hidden="true"]',
 	'[data-xth-image-ref]',
 	'.edui-editor-toolbarbox',
 	'.edui-toolbar',
@@ -38,7 +37,11 @@ const NON_QUESTION_CONTENT = [
 	'.xth-answer-review'
 ].join(',');
 
-/** Ignore hidden templates and editor chrome, including visibility inherited from an ancestor. */
+/**
+ * Ignore visually hidden templates and editor chrome, including hidden ancestors.
+ * Chaoxing marks visible question stems and options aria-hidden for accessibility;
+ * that attribute alone must not exclude their text or images.
+ */
 export function isQuestionContentElement(element: Element, cache = new Map<Element, boolean>()): boolean {
 	const cached = cache.get(element);
 	if (cached !== undefined) return cached;
@@ -146,10 +149,51 @@ export function questionElementText(root: HTMLElement, imageUrls: string[]): str
 		else if (copy === clone) return marker;
 		else copy.replaceWith(root.ownerDocument.createTextNode(marker));
 	}
+	// Rich-text blanks are often underlined NBSPs, which textContent otherwise flattens away.
+	// Mark only empty underline runs; underlined words (for example SQL primary keys) stay literal.
+	for (let index = 0; index < originals.length; index++) {
+		const original = originals[index],
+			copy = copies[index];
+		if (
+			(copy !== clone && !clone.contains(copy)) ||
+			!original.textContent ||
+			original.textContent.trim() ||
+			copy.textContent?.trim()
+		)
+			continue;
+		const style = original.ownerDocument.defaultView?.getComputedStyle(original);
+		if (
+			original.tagName === 'U' ||
+			/\bunderline\b/.test((style?.textDecorationLine || '') + ' ' + (style?.textDecoration || ''))
+		)
+			copy.textContent = '\uFFF0blank\uFFF1';
+	}
 	clone.querySelectorAll('script, style').forEach((node) => node.remove());
-	clone.querySelectorAll('br').forEach((node) => node.replaceWith(root.ownerDocument.createTextNode('\n')));
-	clone.querySelectorAll('p,div,li,pre,table,tr,td,dt,dd,h1,h2,h3,h4').forEach((node) => node.append(' '));
-	return (clone.textContent || '').replace(/\s+/g, ' ').trim();
+	// Source formatting whitespace collapses inline; visible line breaks must still separate blanks.
+	const lineBoundary = '\uFFF0line\uFFF1';
+	for (let index = 0; index < originals.length; index++) {
+		const original = originals[index],
+			copy = copies[index];
+		if (copy !== clone && !clone.contains(copy)) continue;
+		const whiteSpace =
+			original.ownerDocument.defaultView?.getComputedStyle(original).whiteSpace ||
+			(original.tagName === 'PRE' ? 'pre' : '');
+		if (/^(?:pre|pre-wrap|pre-line|break-spaces)$/.test(whiteSpace))
+			copy.childNodes.forEach((node) => {
+				if (node.nodeType === 3) node.nodeValue = (node.nodeValue || '').replace(/\r\n?|\n/g, lineBoundary);
+			});
+	}
+	clone.querySelectorAll('br').forEach((node) => node.replaceWith(root.ownerDocument.createTextNode(lineBoundary)));
+	clone.querySelectorAll('p,div,li,pre,table,tr,td,dt,dd,h1,h2,h3,h4,h5,h6,blockquote').forEach((node) => {
+		node.prepend(lineBoundary);
+		node.append(lineBoundary);
+	});
+	return (clone.textContent || '')
+		.replace(/\uFFF0blank\uFFF1(?:\s*\uFFF0blank\uFFF1)+/g, '\uFFF0blank\uFFF1')
+		.replace(/\uFFF0blank\uFFF1/g, ' ____ ')
+		.replace(/\uFFF0line\uFFF1/g, ' ')
+		.replace(/\s+/g, ' ')
+		.trim();
 }
 /** Option images can be siblings of the text label; include the row only if it contains one option. */
 export function questionOptionRoot(option: HTMLElement, options: HTMLElement[]): HTMLElement {

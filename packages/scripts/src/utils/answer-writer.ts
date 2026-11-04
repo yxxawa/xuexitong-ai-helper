@@ -1,6 +1,6 @@
 import { createDefaultQuestionResolver } from '@xuexitong-ai-helper/core/src/core/worker/question.resolver';
 import type { WorkContext } from '@xuexitong-ai-helper/core/src/core/worker/interface';
-import { fillTextAnswer, isOptionChecked, optionRow, readPageAnswer } from './answer-input';
+import { canFillTextAnswer, fillTextAnswer, isOptionChecked, optionRow, readPageAnswer, readTextAnswer } from './answer-input';
 import {
 	normalizeProgramAnswer,
 	writeProgrammingAnswer,
@@ -19,12 +19,15 @@ export async function fillStandardAnswer(
 	const result = await createDefaultQuestionResolver(ctx)[type](ctx.searchInfos, options, (_type, answer, option) => {
 		writes.push({ option, answer });
 	});
+	if (!result.finish && type === 'completion' && result.answerCount > 0)
+		throw new Error(`填空答案数量不匹配：本题有 ${options.length} 个空，收到 ${result.answerCount} 个答案，未填写；请重新作答。`);
 	if (!result.finish || !writes.length) return { ...result, finish: false };
 	const writable = (option: HTMLElement) => {
 		const row = optionRow(option);
 		return (
 			option.isConnected &&
 			ctx.root.contains(option) &&
+			(type !== 'completion' || canFillTextAnswer(option)) &&
 			!row.matches(':disabled,[aria-disabled="true"]') &&
 			!row.closest('fieldset[disabled]') &&
 			!row.querySelector('input:disabled,textarea:disabled,input[readonly],textarea[readonly]')
@@ -66,16 +69,15 @@ export async function fillStandardAnswer(
 	}
 	await ctx.waitUntilReady?.();
 	if (ctx.isCancelled?.()) throw new Error('答题已取消');
-	const expected =
-		type === 'completion'
-			? options.map((option) => writes.find((write) => write.option === option)!.answer.trim()).join('#')
-			: [...selected]
-					.sort((a, b) => a - b)
-					.map((index) => String.fromCharCode(65 + index))
-					.join('#');
+	const expectedChoices = [...selected]
+		.sort((a, b) => a - b)
+		.map((index) => String.fromCharCode(65 + index))
+		.join('#');
 	const finish =
 		options.every((option) => option.isConnected && ctx.root.contains(option)) &&
-		readPageAnswer(type, options, ctx.root) === expected;
+		(type === 'completion'
+			? writes.every(({ option, answer }) => readTextAnswer(option) === answer.trim())
+			: readPageAnswer(type, options, ctx.root) === expectedChoices);
 	if (!finish) throw new Error('未能确认网页已保存完整答案，请检查本题后重试。');
 	return { ...result, finish };
 }

@@ -121,3 +121,54 @@ test('matching pair labels determine source order and duplicates or missing sour
   for(const value of ['1-a, 1-b','1-a','3-a, 1-b','2-a, 0-b'])
     assert.equal(normalizeAnswerByQuestionType(value,'line',groups),'');
 });
+
+
+test('homework matching reads lineCt columns and closed dropdown labels without exposing the menus', t => {
+  const e=fixture(t,'work'), before=e.root.innerHTML;
+  const groups=e.api.collectLineOptionGroups(e.root);
+  assert.equal(groups.length,2);
+  assert.match(groups[0].title,/插入/); assert.match(groups[1].title,/删除/);
+  assert.deepEqual(plain(groups[0].options).map(option=>({...option,text:option.text.replace(/\s+/g,'')})),[{value:'A',text:'A.delete'},{value:'B',text:'B.insert'}]);
+  const {questionElementText}=loadTS('packages/scripts/src/utils/question.ts',e.globals);
+  const title=e.api.cxQuestionTitles(e.root,'h3').map(node=>questionElementText(node,[])).join(' ');
+  assert.match(title,/插入/); assert.match(title,/delete/); assert.equal(e.root.innerHTML,before);
+});
+
+test('homework matching verifies both native selection markers and its aggregate saved JSON', async t => {
+  const e=fixture(t,'work');
+  for (const box of e.root.querySelectorAll('.selectBox')) for (const option of box.querySelectorAll('li[data]'))
+    option.querySelector('a').addEventListener('click',()=>{
+      const label=box.querySelector('p span'); label.textContent=option.textContent; label.setAttribute('value',option.getAttribute('data'));
+      e.root.querySelector('#answer99').value=JSON.stringify([...e.root.querySelectorAll('.connlineSelect99')].map(field=>({name:field.getAttribute('data'),content:field.getAttribute('value')})));
+    });
+  assert.equal((await e.api.fillLineAnswer('B#A',e.root,delay)).finish,true);
+  assert.equal(e.api.readLineAnswer(e.root),'B#A');
+  e.root.querySelector('#answer99').value='[{"name":"1","content":"A"},{"name":"2","content":"A"}]';
+  assert.equal(e.api.readLineAnswer(e.root),undefined);
+  e.root.querySelector('#answer99').value='[{"name":"1","content":"B"},{"name":"1","content":"A"}]';
+  assert.equal(e.api.readLineAnswer(e.root),undefined);
+});
+
+
+test('native matching controls disabled through their fieldset reject the entire write', async t=>{
+  const e=fixture(t),field=e.document.createElement('fieldset');field.disabled=true;
+  const second=e.root.querySelectorAll('select')[1];second.before(field);field.append(second);
+  const before=[...e.root.querySelectorAll('select')].map(select=>select.value);
+  assert.equal((await e.api.fillLineAnswer('b#a',e.root,delay)).finish,false);
+  assert.deepEqual([...e.root.querySelectorAll('select')].map(select=>select.value),before);
+});
+test('a disabled custom matching menu is rejected before any click', async t=>{
+  const e=fixture(t,'legacy');let clicks=0;
+  e.root.querySelectorAll('.selectBox')[1].setAttribute('aria-disabled','true');
+  for(const link of e.root.querySelectorAll('a'))link.addEventListener('click',()=>clicks++);
+  assert.equal((await e.api.fillLineAnswer('b#a',e.root,delay)).finish,false);
+  assert.equal(clicks,0);
+});
+
+
+test('matching rechecks option availability after each delayed write', async t=>{
+  const e=fixture(t), selects=e.root.querySelectorAll('select');
+  const secondBefore=selects[1].value;
+  const result=await e.api.fillLineAnswer('b#a',e.root,async()=>{selects[1].querySelector('option[value="a"]').disabled=true;});
+  assert.equal(result.finish,false);assert.equal(selects[0].value,'b');assert.equal(selects[1].value,secondBefore);
+});

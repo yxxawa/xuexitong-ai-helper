@@ -128,6 +128,29 @@ test('an image-only stem without h3 reaches AI and can be answered', async t => 
   assert.equal(e.queries.length, 1); assert.equal(e.queries[0].title, '[图片1]'); assert.equal(results[0].result.finish, true);
 });
 
+test('visible Chaoxing homework headings marked aria-hidden still reach AI', async t => {
+  const e = cxSetup(t, '<div class="questionLi"><h3 class="mark_name colorDeep fontLabel workTextWrap" aria-hidden="true">1. (填空题, 8分)<p>填写 SQL 查询中的关键字：select sid ___ students</p></h3><input type="hidden" id="answertype1" value="2"><div class="eidtDiv"><textarea></textarea></div></div>', { query: () => infos('from') });
+  const { results } = await e.start();
+  assert.equal(e.queries.length, 1);
+  assert.match(e.queries[0].title, /select sid ___ students/);
+  assert.equal(e.queries[0].type, 'completion');
+  assert.equal(results[0].result.finish, true);
+  assert.equal(e.document.querySelector('textarea').value, 'from');
+  assert.equal(e.document.querySelector('h3').getAttribute('aria-hidden'), 'true');
+});
+
+test('aria-hidden on a visible question ancestor preserves its image stem and image options', async t => {
+  const pictureChoices = choices.replace('第一项', '<img aria-hidden="true" src="' + PNG + '">').replace('第二项', '<img src="' + GIF + '">');
+  const e = cxSetup(t, '<div aria-hidden="true"><div class="questionLi"><h3 aria-hidden="true"><img aria-hidden="true" src="' + PNG + '"></h3><input type="hidden" id="answertype1" value="0">' + pictureChoices + '</div></div>');
+  const { results } = await e.start();
+  assert.equal(e.queries.length, 1);
+  assert.equal(e.queries[0].title, '[图片1]');
+  assert.deepEqual(e.queries[0].imageUrls, [PNG, GIF]);
+  assert.deepEqual(e.queries[0].options, ['[图片1]', '[图片2]']);
+  assert.equal(results[0].result.finish, true);
+  assert.equal(e.document.querySelector('#a').checked, true);
+});
+
 test('secret-font decoding preserves option nodes and native event listeners', async t => {
   const e = cxSetup(t, '<style>@font-face{font-family:font-cxsecret;src:url(data:font/ttf;base64,AQID)}</style><div class="questionLi" id="q1"><h3>1.（单选题）选择字</h3><input id="answertype1" value="0"><div class="answerBg font-cxsecret">' + choices + '漢</div></div>', { font: true });
   const original = e.document.querySelector('.answer_p'); let clicks = 0; original.addEventListener('click', () => clicks++);
@@ -153,7 +176,7 @@ test('a late answer cannot be written after the question changes in place during
 
 
 
-for (const hidden of ['hidden', 'style="display:none"', 'style="visibility:hidden"', 'aria-hidden="true"']) {
+for (const hidden of ['hidden', 'style="display:none"', 'style="visibility:hidden"', 'style="visibility:collapse"', 'aria-hidden="true" hidden', 'aria-hidden="true" style="display:none"']) {
   test('hidden question content is ignored for ' + hidden, t => {
     const e = aiSetup(t, '<div id="q"><p>可见内容<img src="' + PNG + '"></p><div ' + hidden + '><img><span>旧题</span></div><img ' + hidden + '></div>');
     const root = e.document.querySelector('#q'), images = e.q.inspectQuestionImages([root]);
@@ -289,4 +312,38 @@ test('an answer-review proposal is rejected after its stem changes', async t => 
   assert.throws(() => e.reviews[0].available(), /已变化/);
   await assert.rejects(e.reviews[0].apply(infos('A')), /已变化/);
   assert.equal(e.document.querySelector('#b').checked, true);
+});
+
+const underlinedCompletion = fs.readFileSync(path.join(ROOT, 'tests/fixtures/completion-underlined.html'), 'utf8');
+const sqlAnswers = ['INTERSECT', 'DISTINCT', 'IN', 'JOIN', 'ON', "ch1.cid='10014'"];
+test('underlined whitespace reaches the actual worker as six blank positions and six answer fields', async t => {
+  const e = cxSetup(t, underlinedCompletion, { query: () => infos(sqlAnswers.join('#')) });
+  const originalTitle = e.document.querySelector('h3').innerHTML;
+  const { results } = await e.start();
+  assert.equal(e.queries[0].blankCount, 6);
+  assert.equal((e.queries[0].title.match(/____/g) || []).length, 6);
+  assert.match(e.queries[0].title, /select ____ sid/);
+  assert.match(e.queries[0].title, /sid ____ \(select sid/);
+  assert.equal(results[0].result.finish, true);
+  assert.deepEqual([...e.document.querySelectorAll('textarea')].map(input => input.value), sqlAnswers);
+  assert.equal(e.document.querySelector('h3').innerHTML, originalTitle);
+});
+
+test('five returned answers for six blanks report the mismatch before writing any field', async t => {
+  const e = cxSetup(t, underlinedCompletion, { query: () => infos("INTERSECT#IN#JOIN#ON#ch1.cid='10014'") });
+  const { results } = await e.start();
+  assert.equal(results[0].result.finish, false);
+  assert.match(results[0].error, /6.*5/);
+  assert.deepEqual([...e.document.querySelectorAll('textarea')].map(input => input.value), Array(6).fill(''));
+});
+
+for (const provider of ['openai', 'anthropic', 'web']) test('completion prompts include the actual blank count for ' + provider, async t => {
+  const e = aiSetup(t);
+  if (provider === 'anthropic') e.opts.aiApiUrl = 'https://api.anthropic.com';
+  if (provider === 'web') e.opts.aiProvider = 'deepseek-web';
+  await e.ai.queryAIAnswerer(e.opts, { title: 'select ____ sid from choices where sid ____ (select sid from choices)', type: 'completion', blankCount: 2 });
+  const prompt = provider === 'web' ? e.webCalls[0][0] : JSON.stringify(e.calls[0].data.messages);
+  assert.match(prompt, /本题共有 2 个空/);
+  assert.match(prompt, /answers.*2/);
+  assert.match(prompt, /select ____ sid/);
 });

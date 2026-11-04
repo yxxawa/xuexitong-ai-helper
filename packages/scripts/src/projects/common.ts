@@ -83,6 +83,7 @@ type SearchAnswerOptions = {
 	type?: string;
 	options?: string[] | string;
 	lineOptions?: AILineOptionGroup[];
+	blankCount?: number;
 	hasImage?: boolean;
 	unresolvedImageCount?: number;
 	imageUrls?: string[];
@@ -1525,6 +1526,7 @@ async function searchAnswer(
 			programmingDraft: searchOptions.programmingDraft,
 			options: searchOptions.options,
 			lineOptions: searchOptions.lineOptions,
+			blankCount: searchOptions.blankCount,
 			hasImage: searchOptions.hasImage,
 			unresolvedImageCount: searchOptions.unresolvedImageCount,
 			imageUrls: searchOptions.imageUrls

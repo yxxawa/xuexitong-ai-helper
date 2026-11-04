@@ -12,8 +12,8 @@ export type CXQuestionType =
 	| 'programming';
 
 const LINE_CONTROLS = '.line_answer_ct .selectBox, .line_answer_ct select, .thirdUlList select, select.dept_select';
-const LEFT_COLUMN = '.firstUlList, .line_wid_half.fl';
-const RIGHT_COLUMN = '.secondUlList, .line_wid_half.fr';
+const LEFT_COLUMN = '.firstUlList, .line_wid_half.fl, .line_wid_400.fl';
+const RIGHT_COLUMN = '.secondUlList, .line_wid_half.fr, .line_wid_400.fr';
 
 /** Old custom menus and the new native/Chosen selects are alternative renderers, not separate blanks. */
 export function lineSelectBoxes(root: HTMLElement | Document): HTMLElement[] {
@@ -119,8 +119,8 @@ export function resolveQuestionType(
 function columnItems(root: HTMLElement | Document, selector: string, imageUrls: string[]): string[] {
 	const column = root.querySelector<HTMLElement>(selector);
 	if (!column) return [];
-	const items = Array.from(column.querySelectorAll<HTMLElement>('li')).filter(
-		(item) => !item.parentElement?.closest('li') || !column.contains(item.parentElement.closest('li'))
+	const items = Array.from(column.querySelectorAll<HTMLElement>('li, .lineCt')).filter(
+		(item) => !item.parentElement?.closest('li, .lineCt') || !column.contains(item.parentElement.closest('li, .lineCt'))
 	);
 	return (items.length ? items : (Array.from(column.children) as HTMLElement[])).map((item) =>
 		questionElementText(item, imageUrls)
@@ -146,7 +146,11 @@ function lineOptions(box: HTMLElement, imageUrls: string[]) {
 	}
 	return Array.from(box.querySelectorAll<HTMLElement>('li[data]'))
 		.filter((item) => !item.matches('[aria-disabled="true"],.disabled'))
-		.map((item) => ({ value: item.getAttribute('data') || '', text: questionElementText(item, imageUrls) }))
+		.map((item) => ({
+			value: item.getAttribute('data') || '',
+			// A closed menu is hidden by design; its semantic labels still map to the visible right column.
+			text: questionElementText(item, imageUrls) || (item.querySelector('a')?.textContent || item.textContent || '').trim()
+		}))
 		.filter((option) => !isPlaceholder(option.value, option.text));
 }
 
@@ -171,7 +175,7 @@ export function collectLineOptionGroups(root: HTMLElement, imageUrls: string[] =
 				return key && (key.toLowerCase() === label.toLowerCase() || key === option.value);
 			});
 			// A menu containing only labels is meaningful only when its column text is available.
-			if (/^[A-Za-z]$/.test(label) && matches.length !== 1) incomplete = true;
+			if (!option.text.trim() || (/^[A-Za-z]$/.test(label) && matches.length !== 1)) incomplete = true;
 			return { value: option.value, text: matches.length === 1 ? matches[0] : option.text };
 		})
 	}));
@@ -190,10 +194,27 @@ export function readLineAnswer(root: HTMLElement): string | undefined {
 	if (!boxes.length || collectLineOptionGroups(root).length !== boxes.length) return;
 	const legacy = boxes.filter((box) => box.tagName !== 'SELECT');
 	const inputs = legacyAnswerInputs(root);
-	if (legacy.length && inputs.length !== legacy.length) return;
+	let legacyAnswers = inputs.map((input) => input.value.trim());
+	if (legacy.length && inputs.length !== legacy.length) {
+		// Current homework menus save all pairs in #answer<qid> and mirror each value on a span.
+		const questionId = legacy[0].closest('.line_answer')?.getAttribute('data');
+		const saved = questionId && Array.from(root.querySelectorAll<HTMLInputElement>('input'))
+			.find((input) => input.id === 'answer' + questionId);
+		if (!saved) return;
+		try {
+			const pairs: { name: string; content: string }[] = JSON.parse(saved.value);
+			if (!Array.isArray(pairs) || pairs.length !== legacy.length) return;
+			legacyAnswers = legacy.map((box) => {
+				const field = box.querySelector('p span[value][data]');
+				const matches = pairs.filter((pair) => pair && String(pair.name) === field?.getAttribute('data'));
+				const value = matches.length === 1 && typeof matches[0].content === 'string' ? matches[0].content.trim() : '';
+				return field && value === field.getAttribute('value')?.trim() ? value : '';
+			});
+		} catch { return; }
+	}
 	let legacyIndex = 0;
 	const answers = boxes.map((box) =>
-		box.tagName === 'SELECT' ? (box as HTMLSelectElement).value : inputs[legacyIndex++].value.trim()
+		box.tagName === 'SELECT' ? (box as HTMLSelectElement).value : legacyAnswers[legacyIndex++]
 	);
 	if (answers.every((answer, index) => lineOptions(boxes[index], []).some((option) => option.value === answer)))
 		return answers.join('#');
@@ -209,10 +230,16 @@ export async function fillLineAnswer(
 ): Promise<{ finish: boolean }> {
 	const boxes = lineSelectBoxes(root);
 	const answers = answer.split('#').map((value) => value.trim());
+	const writable = (box: HTMLElement) =>
+		box.isConnected &&
+		root.contains(box) &&
+		!box.matches(':disabled,[disabled]') &&
+		!box.closest('[aria-disabled="true"],.disabled') &&
+		(box.tagName === 'SELECT' || !box.closest('fieldset[disabled]'));
 	if (
 		!boxes.length ||
 		collectLineOptionGroups(root).length !== boxes.length ||
-		boxes.some((box) => !box.isConnected || (box.tagName === 'SELECT' && (box as HTMLSelectElement).disabled)) ||
+		boxes.some((box) => !writable(box)) ||
 		answers.length !== boxes.length ||
 		answers.some((value, index) => !lineOptions(boxes[index], []).some((option) => option.value === value))
 	)
@@ -221,10 +248,10 @@ export async function fillLineAnswer(
 		await beforeWrite?.();
 		if (cancelled()) throw new Error('答题已取消');
 		const box = boxes[index];
-		if (!box.isConnected) return { finish: false };
+		if (!writable(box) || !lineOptions(box, []).some((option) => option.value === answers[index]))
+			return { finish: false };
 		if (box.tagName === 'SELECT') {
 			const select = box as HTMLSelectElement;
-			if (select.disabled) return { finish: false };
 			select.value = answers[index];
 			const EventType = select.ownerDocument.defaultView!.Event;
 			select.dispatchEvent(new EventType('input', { bubbles: true }));

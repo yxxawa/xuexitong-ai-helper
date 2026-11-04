@@ -29,6 +29,7 @@ export function questionCacheKey(opts: AIAnswererOptions, question: AIQuestionPa
 			credential: opts.aiProvider === 'deepseek-web' ? 'web-session' : md5(opts.aiApiKey || ''),
 			title: question.type === 'programming' ? question.title.replace(/\r\n?/g, '\n') : normalize(question.title),
 			type: question.type || 'unknown',
+			blankCount: question.type === 'completion' ? question.blankCount : undefined,
 			programmingDraft: question.type === 'programming' ? (question.programmingDraft || '').replace(/\r\n?/g, '\n') : undefined,
 			options: options.map(normalize),
 			images: question.imageUrls || [],
@@ -93,13 +94,16 @@ export class QuestionAnswerCache {
 		);
 		const result = info?.results.find((result) => result.answer?.trim());
 		if (!info || !result) throw new Error('检验结果无有效答案，缓存未更新。');
+		const answerParts = safeAnswerParts(result.extra_data, result.answer);
+		if (!matchesCompletionCount(question, result.answer, answerParts))
+			throw new Error('填空答案数量与页面不匹配，缓存未更新。');
 		this.generation++;
 		const key = questionCacheKey(opts, question),
 			keys = new Set([key, ...previousKeys]);
 		const entries = this.list();
 		const corrected = {
 			answer: result.answer,
-			answerParts: safeAnswerParts(result.extra_data, result.answer),
+			answerParts,
 			solution: String((result.extra_data as any)?.solution || ''),
 			from: info.name,
 			homepage: info.homepage || '',
@@ -125,7 +129,13 @@ export class QuestionAnswerCache {
 	): Promise<SearchInformation[]> {
 		const key = questionCacheKey(opts, question);
 		const hit = this.store.enabled() ? this.list().find((entry) => entry.key === key) : undefined;
-		if (hit) {
+		if (
+			hit &&
+			!matchesCompletionCount(question, hit.answer, safeAnswerParts({ answer_parts: hit.answerParts }, hit.answer))
+		) {
+			// A failed fill must be able to request a fresh answer on retry.
+			this.store.set(this.list().filter((entry) => entry.key !== key));
+		} else if (hit) {
 			this.store.set([hit, ...this.list().filter((entry) => entry.key !== key)]);
 			return [
 				{
@@ -173,10 +183,12 @@ export class QuestionAnswerCache {
 					(item) => !item.error && !(item.data as any)?.skipped && item.results.some((result) => result.answer?.trim())
 				);
 				const result = info?.results.find((item) => item.answer?.trim());
+				const answerParts = result && safeAnswerParts(result.extra_data, result.answer);
 				if (
 					info &&
 					result &&
 					question.type !== 'programming' &&
+					matchesCompletionCount(question, result.answer, answerParts) &&
 					this.store.enabled() &&
 					generation === this.generation
 				) {
@@ -185,7 +197,7 @@ export class QuestionAnswerCache {
 						key,
 						title: question.title,
 						answer: result.answer,
-						answerParts: safeAnswerParts(result.extra_data, result.answer),
+						answerParts,
 						from: info.name,
 						homepage: info.homepage || '',
 						solution: String((result.extra_data as any)?.solution || ''),
@@ -201,6 +213,14 @@ export class QuestionAnswerCache {
 		this.pending.set(key, task);
 		return task;
 	}
+}
+
+/** Keep explicit blank boundaries: a literal hash inside one answer is not a separator. */
+function matchesCompletionCount(question: AIQuestionPayload, answer: string, answerParts?: string[]): boolean {
+	const count = question.blankCount;
+	if (question.type !== 'completion' || !Number.isInteger(count) || !count || count < 1) return true;
+	const parts = answerParts || (count === 1 ? [answer] : answer.split('#'));
+	return parts.length === count && parts.every((part) => Boolean(part.trim()));
 }
 
 function safeAnswerParts(extra: any, answer: string): string[] | undefined {

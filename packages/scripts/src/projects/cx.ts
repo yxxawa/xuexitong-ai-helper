@@ -768,7 +768,8 @@ function describeCXQuestion(ctx: WorkContext<any>, titleTransform: CXTitleTransf
 			  )
 			: undefined;
 	const language = type === 'programming' ? programLanguage(ctx.root) : '';
-	return { title: language ? title + '\n编程语言：' + language : title, type, options, lineOptions, ...images };
+	const blankCount = type === 'completion' ? elements.options?.length : undefined;
+	return { title: language ? title + '\n编程语言：' + language : title, type, options, blankCount, lineOptions, ...images };
 }
 const programmingDrafts = new WeakMap<WorkContext<any>, string>();
 const answerWriteChecks = new WeakMap<WorkContext<any>, () => void>();

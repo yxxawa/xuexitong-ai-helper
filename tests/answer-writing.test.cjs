@@ -98,3 +98,50 @@ test('a pause before page navigation can be cancelled without advancing the ques
   await clock.advance(500);assert.equal(clicks,0);closed=true;await clock.advance(200);await task;
   assert.equal(clicks,0);
 });
+
+
+test('two structured AI answer parts cannot be silently pasted into one blank', async t=>{
+  const e=setup(t,'<textarea></textarea>','one#two');
+  e.ctx.searchInfos[0].results[0].extra_data.answer_parts=['one','two'];
+  await assert.rejects(e.api.fillStandardAnswer(e.ctx,'completion',delay),/1.*2/);
+  assert.equal(e.options[0].value,'');
+});
+test('a literal hash in one structured answer remains one editable blank', async t=>{
+  const e=setup(t,'<textarea></textarea>','value#literal');
+  e.ctx.searchInfos[0].results[0].extra_data.answer_parts=['value#literal'];
+  assert.equal((await e.api.fillStandardAnswer(e.ctx,'completion',delay)).finish,true);
+  assert.equal(e.options[0].value,'value#literal');
+});
+test('completion verification compares individual blanks even when their joined text collides', async t=>{
+  const e=setup(t,'<textarea></textarea><textarea></textarea>','alpha#beta#gamma');
+  e.ctx.searchInfos[0].results[0].extra_data.answer_parts=['alpha#beta','gamma'];
+  e.options[1].addEventListener('change',()=>{e.options[0].value='alpha';e.options[1].value='beta#gamma';});
+  await assert.rejects(e.api.fillStandardAnswer(e.ctx,'completion',delay),/保存完整答案/);
+});
+test('an upload control before the editor is not mistaken for a text-answer field', async t=>{
+  const e=setup(t,'<div class="blank"><input type="file"><textarea></textarea></div>','answer');
+  e.ctx.elements.options=[e.root.querySelector('.blank')];
+  assert.equal((await e.api.fillStandardAnswer(e.ctx,'completion',delay)).finish,true);
+  assert.equal(e.root.querySelector('textarea').value,'answer');
+  assert.equal(e.root.querySelector('input[type=file]').value,'');
+});
+
+
+test('an upload control does not break a textarea and iframe editor pair', async t=>{
+  const e=setup(t,'<input type="file"><textarea></textarea><iframe></iframe>','value#literal');
+  const body=e.root.querySelector('iframe').contentDocument.body;body.contentEditable='true';
+  assert.equal((await e.api.fillStandardAnswer(e.ctx,'completion',delay)).finish,true);
+  assert.equal(e.options[0].value,'value#literal');assert.equal(body.textContent,'value#literal');
+});
+test('sibling blank fields never borrow a shared iframe or each other', async t=>{
+  const e=setup(t,'<textarea></textarea><textarea></textarea><iframe></iframe>','first#second');
+  const body=e.root.querySelector('iframe').contentDocument.body;body.textContent='unrelated';
+  assert.equal((await e.api.fillStandardAnswer(e.ctx,'completion',delay)).finish,true);
+  assert.deepEqual(e.options.map(option=>option.value),['first','second']);assert.equal(body.textContent,'unrelated');
+});
+test('a blank with only an upload control rejects the whole fill before changing earlier answers', async t=>{
+  const e=setup(t,'<div class="blank"><textarea></textarea></div><div class="blank"><input type="file"></div>','one#two');
+  e.ctx.elements.options=[...e.root.querySelectorAll('.blank')];
+  assert.equal((await e.api.fillStandardAnswer(e.ctx,'completion',delay)).finish,false);
+  assert.equal(e.root.querySelector('textarea').value,'');
+});

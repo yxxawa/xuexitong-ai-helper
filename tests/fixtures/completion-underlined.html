@@ -1,0 +1,18 @@
+<div class="questionLi">
+<h3 class="mark_name colorDeep fontLabel workTextWrap" aria-hidden="true">1. (填空题, 48分)
+<p>查询既选了课程 10014，又选了课程 10031 的学生学号。</p>
+<p>方法1：</p><p>select sid from choices where cid='10014'</p>
+<p><span style="text-decoration: underline;">&nbsp; &nbsp; &nbsp;</span><br></p>
+<p>select sid from choices where cid='10031'</p>
+<p>方法2：</p><p>select <span style="text-decoration:underline;">&nbsp; &nbsp;&nbsp;</span><span style="text-decoration:underline;"><span style="text-decoration:none;">&nbsp;</span></span>&nbsp;sid from choices where cid='10014' and sid <span style="text-decoration:underline;">&nbsp; &nbsp;&nbsp;</span> (select sid from choices where cid='10031')</p>
+<p>方法3：</p><p>select distinct ch1.sid</p>
+<p>from choices ch1 <span style="text-decoration: underline;">&nbsp; &nbsp;</span> choices ch2 <span style="text-decoration: underline;">&nbsp; &nbsp;</span> ch1.sid=ch2.sid</p>
+<p>where <span style="text-decoration: underline;"> &nbsp; &nbsp;</span><span style="text-decoration:none;"> &nbsp;</span>and ch2.cid='10031'</p>
+</h3><input type="hidden" id="answertype1" value="2">
+<div class="textDIV"><textarea></textarea></div>
+<div class="textDIV"><textarea></textarea></div>
+<div class="textDIV"><textarea></textarea></div>
+<div class="textDIV"><textarea></textarea></div>
+<div class="textDIV"><textarea></textarea></div>
+<div class="textDIV"><textarea></textarea></div>
+</div>

@@ -1,23 +1,33 @@
 import { readLineAnswer } from './cx-question';
 import { readProgrammingAnswer, type ProgramPageWindow } from './programming';
 
+function isTextAnswerElement(element: HTMLElement): element is HTMLInputElement | HTMLTextAreaElement {
+	return (
+		element.tagName === 'TEXTAREA' ||
+		(element.tagName === 'INPUT' &&
+			['text', 'search', 'email', 'url', 'tel', 'number', 'password'].includes((element as HTMLInputElement).type))
+	);
+}
+
 /** Keep each blank scoped to its own editor; never borrow a sibling blank's textarea. */
 function textAnswerElements(option: HTMLElement) {
-	const directText = option.matches('textarea,input');
+	const directText = isTextAnswerElement(option);
 	const directEditable = option.matches('[contenteditable="true"]');
 	const root = directText ? option.parentElement || option : option;
-	const text = (
-		directText ? option : directEditable ? null : root.querySelector('textarea,input:not([type="hidden"])')
-	) as HTMLTextAreaElement | HTMLInputElement | null;
+	const fields = Array.from(root.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('textarea,input')).filter(
+		isTextAnswerElement
+	);
+	const text = directText
+		? option
+		: directEditable
+		? null
+		: fields.find((field) => field.tagName === 'TEXTAREA') || fields[0];
 	let body: HTMLElement | null | undefined = directEditable ? option : undefined;
 	if (!directEditable) {
 		try {
 			// A textarea and iframe may be the backing field/editor pair. Multiple text
 			// fields in their parent instead belong to different blanks.
-			const frame =
-				!directText || root.querySelectorAll('textarea,input:not([type="hidden"])').length === 1
-					? root.querySelector<HTMLIFrameElement>('iframe')
-					: null;
+			const frame = !directText || fields.length === 1 ? root.querySelector<HTMLIFrameElement>('iframe') : null;
 			body =
 				frame?.contentDocument?.body ||
 				(!directText ? root.querySelector<HTMLElement>('[contenteditable="true"]') : null);
@@ -27,10 +37,16 @@ function textAnswerElements(option: HTMLElement) {
 	}
 	return { text, body };
 }
+/** Check every blank before the first mutation, including editors that have not loaded yet. */
+export function canFillTextAnswer(option: HTMLElement): boolean {
+	const { text, body } = textAnswerElements(option);
+	return option.isConnected && Boolean(text || body) && !text?.matches(':disabled') && !text?.readOnly;
+}
+
 /** Input mutations must notify the platform, and never interpret a model answer as executable HTML. */
 export function fillTextAnswer(option: HTMLElement, answer: string) {
 	const { text, body } = textAnswerElements(option);
-	if (!option.isConnected || text?.disabled || text?.readOnly) throw new Error('输入框不可编辑，未标记为完成。');
+	if (!option.isConnected || text?.matches(':disabled') || text?.readOnly) throw new Error('输入框不可编辑，未标记为完成。');
 	if (!text && !body) throw new Error('未找到可填写的输入框，未标记为完成，请手动检查。');
 	if (text) {
 		text.value = answer;

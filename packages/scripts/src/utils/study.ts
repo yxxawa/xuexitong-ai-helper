@@ -92,20 +92,109 @@ export function assertStudyActive(signal?: AbortSignal) {
 	}
 }
 
-export function studySleep(ms: number, signal?: AbortSignal) {
+export type StudyPhase = 'running' | 'waiting' | 'recovering' | 'confirming' | 'done' | 'error' | 'stopped';
+
+const studyControls = new WeakMap<AbortSignal, StudyControl>();
+
+/** One control owns the chapter, its media, waits and navigation. */
+export class StudyControl {
+	private controller = new AbortController();
+	private listeners = new Set<() => void>();
+	private pausedAt: number | undefined;
+	private pausedTotal = 0;
+	readonly signal = this.controller.signal;
+	phase: StudyPhase = 'running';
+	detail = '正在查找课程任务';
+	readonly history: string[] = [];
+	constructor() { studyControls.set(this.signal, this); }
+	get paused() { return this.pausedAt !== undefined; }
+	get activeTime() { return Date.now() - this.pausedTotal - (this.pausedAt === undefined ? 0 : Date.now() - this.pausedAt); }
+	subscribe(listener: () => void) { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
+	private notify() { for (const listener of this.listeners) listener(); }
+	pause() {
+		if (this.signal.aborted || this.paused || this.phase === 'done' || this.phase === 'error') return;
+		this.pausedAt = Date.now(); this.notify();
+	}
+	resume() {
+		if (this.pausedAt === undefined || this.signal.aborted) return;
+		this.pausedTotal += Date.now() - this.pausedAt;
+		this.pausedAt = undefined; this.notify();
+	}
+	setStatus(phase: StudyPhase, detail: string) {
+		if (this.signal.aborted || (this.phase === phase && this.detail === detail)) return;
+		this.phase = phase; this.detail = detail;
+		this.history.push(new Date().toLocaleTimeString() + ' ' + detail);
+		if (this.history.length > 30) this.history.shift();
+		this.notify();
+	}
+	stop() { this.setStatus('stopped', '学习已停止'); this.dispose(); }
+	dispose() { this.controller.abort(); this.listeners.clear(); }
+}
+
+export function studyControl(signal?: AbortSignal) { return signal ? studyControls.get(signal) : undefined; }
+export function studyActiveTime(signal?: AbortSignal) { return studyControl(signal)?.activeTime ?? Date.now(); }
+export function studyPaused(signal?: AbortSignal) { return studyControl(signal)?.paused ?? false; }
+export function studyStatus(signal: AbortSignal | undefined, phase: StudyPhase, detail: string) {
+	studyControl(signal)?.setStatus(phase, detail);
+}
+
+function studyDelay(ms: number, signal?: AbortSignal) {
 	return new Promise<void>((resolve, reject) => {
 		assertStudyActive(signal);
-		const finish = () => {
-			clearTimeout(timer);
-			signal?.removeEventListener('abort', abort);
-		};
-		const abort = () => {
-			finish();
-			try { assertStudyActive(signal); } catch (error) { reject(error); }
-		};
+		const finish = () => { clearTimeout(timer); signal?.removeEventListener('abort', abort); };
+		const abort = () => { finish(); try { assertStudyActive(signal); } catch (error) { reject(error); } };
 		const timer = setTimeout(() => { finish(); resolve(); }, ms);
 		signal?.addEventListener('abort', abort, { once: true });
 	});
+}
+
+export async function studyCheckpoint(signal?: AbortSignal) {
+	assertStudyActive(signal);
+	while (studyPaused(signal)) await studyDelay(200, signal);
+	assertStudyActive(signal);
+}
+
+export async function studySleep(ms: number, signal?: AbortSignal) {
+	if (!studyControl(signal)) return studyDelay(ms, signal);
+	const until = studyActiveTime(signal) + ms;
+	do {
+		await studyCheckpoint(signal);
+		const remaining = until - studyActiveTime(signal);
+		if (remaining <= 0) return;
+		await studyDelay(Math.min(200, remaining), signal);
+	} while (true);
+}
+
+/** Newer catalogs use an explicit completed icon instead of a hidden count. */
+export function studyChapterRemaining(chapter: Element | null) {
+	const raw = chapter?.querySelector<HTMLInputElement>('.jobUnfinishCount')?.value.trim();
+	if (raw !== undefined) return /^\d+$/.test(raw) ? Number(raw) : NaN;
+	return chapter?.querySelector('.icon_Completed') ? 0 : NaN;
+}
+
+/** Only positive platform evidence counts as completion; absence is unknown. */
+export function studyTaskComplete(frame: HTMLIFrameElement, attachment?: { isPassed?: boolean }) {
+	if (attachment?.isPassed === true) return true;
+	let current: Element | null = frame;
+	while (current) {
+		const card = current.closest('.ans-attach-ct');
+		if (card) return card.classList.contains('ans-job-finished');
+		try { current = current.ownerDocument.defaultView?.frameElement || null; } catch { return false; }
+	}
+	return false;
+}
+
+export async function waitForStudyCompletion(check: () => boolean, signal?: AbortSignal, timeout = 30000) {
+	studyStatus(signal, 'confirming', '等待平台更新任务完成标记');
+	const startedAt = studyActiveTime(signal);
+	while (true) {
+		await studyCheckpoint(signal);
+		if (check()) return;
+		if (studyActiveTime(signal) - startedAt >= timeout) {
+			throw new Error('平台尚未确认任务完成，已停止自动跳转；请检查任务标记后重试。');
+		}
+		await studySleep(500, signal);
+	}
 }
 
 export interface StudyAttachment {
@@ -161,24 +250,24 @@ export async function runStudyJobs(options: {
 	timeout?: number;
 	settle?: number;
 }) {
-	let changedAt = Date.now();
+	let changedAt = studyActiveTime(options.signal);
 	let signature: string | undefined;
 	while (true) {
-		assertStudyActive(options.signal);
+		await studyCheckpoint(options.signal);
 		const job = options.discover();
 		if (job) {
 			await job.func?.();
 			assertStudyActive(options.signal);
-			changedAt = Date.now();
+			changedAt = studyActiveTime(options.signal);
 			await studySleep(250, options.signal);
 			continue;
 		}
 		const snapshot = options.snapshot();
 		if (snapshot.signature !== signature) {
 			signature = snapshot.signature;
-			changedAt = Date.now();
+			changedAt = studyActiveTime(options.signal);
 		}
-		const elapsed = Date.now() - changedAt;
+		const elapsed = studyActiveTime(options.signal) - changedAt;
 		if (snapshot.ready && snapshot.pending.length === 0 && elapsed >= (options.settle ?? 3000)) return;
 		if (elapsed >= (options.timeout ?? 30000)) {
 			throw new Error(snapshot.ready

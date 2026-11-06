@@ -41,6 +41,8 @@ import {
 	searchStudyFrames, runStudyJobs, isStudyElementVisible, studyReaderTiming
 } from '../utils/study';
 import { runStudyMedia } from '../utils/study-media';
+import { StudyControl, studyControl, studyPaused, studyCheckpoint, studyStatus, studyTaskComplete, studyChapterRemaining, waitForStudyCompletion } from '../utils/study';
+import { mountStudyControls } from '../utils/study-controls';
 import { createVideoQuizController } from '../utils/video-quiz';
 import { hasAnswerProvider } from '../utils/ai';
 import {
@@ -214,6 +216,11 @@ export const CXProject = Project.create({
 						['manually', '完成后暂停，等待手动跳转', '适用于自己手动运行']
 					],
 					defaultValue: 'next' as 'next' | 'job' | 'manually'
+				},
+				autoJumpToUnFinishJob: {
+					label: '进入课程时定位未完成任务',
+					attrs: { type: 'checkbox', title: '关闭后从当前章节开始，复习模式仍从当前章节开始。' },
+					defaultValue: true
 				},
 				restudy: {
 					label: '复习模式',
@@ -666,7 +673,7 @@ export const CXProject = Project.create({
 
 				let chapters = await CXAnalyses.waitForChapterInfos();
 
-				if (!restudy) {
+				if (!restudy && CXProject.scripts.study.cfg.autoJumpToUnFinishJob) {
 					// 如果不是复习模式，则寻找需要运行的任务
 					const params = new URLSearchParams(window.location.href);
 					const mooc = params.get('mooc2');
@@ -678,6 +685,10 @@ export const CXProject = Project.create({
 					}
 
 					// 过滤掉已完成的章节
+					if (chapters.some((chapter) => !Number.isFinite(chapter.unFinishCount))) {
+						$message.warn('章节完成状态尚未就绪，保留当前章节，请稍后重试。');
+						return;
+					}
 					chapters = chapters.filter((chapter) => chapter.unFinishCount !== 0);
 
 					if (chapters.length === 0) {
@@ -1344,8 +1355,7 @@ const CXAnalyses = {
 		return Array.from(top?.document.querySelectorAll('[onclick^="getTeacherAjax"]') || []).map((el) => ({
 			element: el as HTMLElement,
 			chapterId: el.getAttribute('onclick')?.match(/\('(.*)','(.*)','(.*)'\)/)?.[3],
-			// @ts-ignore
-			unFinishCount: parseInt(el.parentElement.querySelector('.jobUnfinishCount')?.value || '0')
+			unFinishCount: studyChapterRemaining(el.parentElement)
 		}));
 	},
 	scrollToActiveChapter() {
@@ -1491,19 +1501,27 @@ function rateHack() {
  */
 type StudyOptions = typeof CXProject.scripts.study.cfg & { workOptions: CommonWorkOptions };
 let activeStudy: Promise<void> | undefined;
+let studyNote: HTMLElement | undefined;
 
 export function study(opts: StudyOptions): Promise<void> {
 	if (activeStudy) return activeStudy;
-	const controller = new AbortController();
-	const leave = () => controller.abort();
+	const control = new StudyControl();
+	const restart = () => { void (activeStudy || Promise.resolve()).then(() => study(opts)); };
+	studyNote?.remove();
+	studyNote = mountStudyControls(control, restart);
+	const leave = () => { control.stop(); studyNote?.remove(); };
 	window.addEventListener('pagehide', leave, { once: true });
-	activeStudy = studyChapter(opts, controller.signal).catch((error) => {
-		if (!controller.signal.aborted) {
+	activeStudy = studyChapter(opts, control.signal).then(() => {
+		control.setStatus('done', '当前页面处理已结束，请以平台任务标记为准');
+	}).catch((error) => {
+		if (!control.signal.aborted) {
+			const detail = String(error instanceof Error ? error.message : error);
+			control.setStatus('error', detail);
 			console.error('章节学习已暂停', error);
-			$message.error({ content: `章节学习已暂停：${String(error instanceof Error ? error.message : error)}`, duration: 0 });
+			$message.error({ content: '章节学习已暂停：' + detail, duration: 0 });
 		}
 	}).finally(() => {
-		controller.abort();
+		control.dispose();
 		window.removeEventListener('pagehide', leave);
 		activeStudy = undefined;
 	});
@@ -1534,13 +1552,14 @@ async function studyChapter(opts: StudyOptions, signal: AbortSignal) {
 			return { ready: !!attachments, signature: JSON.stringify(attachments || null), pending };
 		}
 	});
-	assertStudyActive(signal);
+	await studyCheckpoint(signal);
 
 	// @ts-ignore
 	top._preChapterId = '';
 
 	// 下一章
 	const next = async () => {
+		await studyCheckpoint(signal);
 		if (CXAnalyses.isInFinalTab()) {
 			if (await CXAnalyses.isStuckInBreakingMode()) {
 				return $modal.alert({
@@ -1625,6 +1644,7 @@ async function studyChapter(opts: StudyOptions, signal: AbortSignal) {
 	};
 
 	if (CXProject.scripts.study.cfg.mode !== 'manually') {
+		studyStatus(signal, 'waiting', '当前任务已处理，5 秒后切换章节');
 		const msg = '当前页面可执行任务处理结束，即将跳转；完成状态以平台记录为准。';
 		$message.success({ content: msg });
 		console.info(msg);
@@ -1786,10 +1806,23 @@ function searchJob(
 					}
 				}
 
+				const run = func;
+				const requiresConfirmation = attachment.job === true;
 				const job = {
 					id: studyJobId(attachment),
-					attachment: attachment,
-					func: func
+					attachment,
+					func: run ? async () => {
+						await studyCheckpoint(signal);
+						studyStatus(signal, 'running', '正在处理：' + jobName);
+						const complete = () => {
+							const latest = Array.isArray(knowCardWin.attachments)
+								? knowCardWin.attachments.find((item: Attachment) => studyJobId(item) === studyJobId(attachment)) : undefined;
+							return studyTaskComplete(root, latest || attachment);
+						};
+						if (requiresConfirmation && complete() && !opts.restudy) return;
+						await run();
+						if (requiresConfirmation) await waitForStudyCompletion(complete, signal);
+					} : undefined
 				};
 
 				searchedJobs.push(job);
@@ -1836,7 +1869,7 @@ const JobRunner = {
 		doc: Document,
 		signal?: AbortSignal
 	) {
-		const media = await waitForMedia({ root: doc, signal });
+		let media = await waitForMedia({ root: doc, signal });
 		const { videojs } = domSearch({ videojs: '#video,#audio' }, doc);
 		if (!videojs) throw new Error('未找到播放器，请刷新或手动播放。');
 		state.study.videojs = videojs;
@@ -1861,22 +1894,26 @@ const JobRunner = {
 					volume: CXProject.scripts.study.cfg.volume
 				}),
 				play: (play, signal) => playMedia(play, signal),
+				findMedia: () => doc.querySelector<HTMLMediaElement>('#video video,#audio audio,video,audio') || undefined,
+				onMediaChange: (replacement) => {
+					media = replacement;
+					// @ts-ignore
+					top.currentMedia = replacement;
+					state.study.videojs = doc.querySelector('#video,#audio') || videojs;
+					fixedVideoProgress();
+				},
 				beforePlay: async (signal) => {
 					if (hasFaceRecognition()) await waitForFaceRecognition(signal);
 					if (hasNewFaceRecognition()) await waitForNewFaceRecognition(signal);
 				},
 				isBlocked: () => quiz.isBlocked() || hasFaceRecognition() || hasNewFaceRecognition(),
-				onTick: () => {
-					const errorDiv = doc.querySelector<HTMLElement>('.vjs-modal-dialog-content');
-					if (['视频文件损坏', '网络错误导致视频下载中途失败', '视频因格式不支持', '网络的问题无法加载']
-						.some((text) => errorDiv?.innerText.includes(text))) throw new Error('播放器报告加载失败，请检查网络或手动播放。');
-					quiz.tick();
-				}
+				// The generic player overlay also reports offline failures; native media errors own recovery.
+				onTick: () => quiz.tick()
 			});
 		} finally {
 			// @ts-ignore
 			if (top.currentMedia === media) top.currentMedia = undefined;
-			if (state.study.videojs === videojs) state.study.videojs = undefined;
+			state.study.videojs = undefined;
 		}
 	},
 	/**
@@ -1931,6 +1968,7 @@ const JobRunner = {
 		const cancel = () => { cancelled = true; closeWorker?.(); };
 		signal?.addEventListener('abort', cancel, { once: true });
 		let unwatch: (() => void) | undefined;
+		let unwatchStudy: (() => void) | undefined;
 		let taskNote: MessageElement | undefined;
 		const stopButton = $ui.button('⏹停止章节答题', { onclick: () => { cancelled = true; } });
 		if (providerConfig.aiProvider === 'deepseek-web') taskNote = $message.info({ duration: 0,
@@ -2116,6 +2154,14 @@ const JobRunner = {
 					}
 				}
 			});
+			let studyOwnsPause = false;
+			const syncStudyPause = () => {
+				if (studyPaused(signal)) {
+					if (!worker.isStop) { studyOwnsPause = true; worker.emit('stop'); }
+				} else if (studyOwnsPause) { studyOwnsPause = false; worker.emit('continuate'); }
+			};
+			unwatchStudy = studyControl(signal)?.subscribe(syncStudyPause);
+			syncStudyPause();
 			closeWorker = () => worker.emit('close');
 			worker.on('close', () => { cancelled = true; });
 			worker.opts.readAnswer = (ctx) =>
@@ -2185,7 +2231,7 @@ const JobRunner = {
 			worker.emit('done');
 		} finally {
 			signal?.removeEventListener('abort', cancel);
-			unwatch?.(); taskNote?.remove();
+			unwatch?.(); unwatchStudy?.(); taskNote?.remove();
 			activity?.release();
 			if (cancelled) reportWebTaskStatus('idle', '章节答题已停止。');
 		}

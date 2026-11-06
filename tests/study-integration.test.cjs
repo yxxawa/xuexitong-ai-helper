@@ -14,7 +14,7 @@ function setup(t, options = {}) {
   // Isolate unrelated AI/UI dependencies, not the actual study implementation.
   const source = fs.readFileSync(path.join(ROOT, 'packages/scripts/src/projects/cx.ts'), 'utf8');
   for (const match of source.matchAll(/from ['"]([^'"]+)['"]/g)) stubs[match[1]] = {};
-  delete stubs['../utils/study']; delete stubs['../utils/study-media']; delete stubs['../utils/video-quiz'];
+  delete stubs['../utils/study-controls']; delete stubs['../utils/study']; delete stubs['../utils/study-media']; delete stubs['../utils/video-quiz'];
   class Script {
     constructor(options) {
       Object.assign(this, options);
@@ -29,7 +29,8 @@ function setup(t, options = {}) {
   const ui = { notes: () => h('div'), button: () => h('button') };
   const modal = { alert: attrs => { alerts.push(attrs); return h('div'); } };
   const message = Object.fromEntries(['info', 'warn', 'error', 'success'].map(type => [type, value => {
-    messages.push({ type, content: typeof value === 'string' ? value : value.content }); return h('div');
+    messages.push({ type, content: typeof value === 'string' ? value : value.content });
+    const note = h('div'); if (value.content instanceof env.window.HTMLElement) note.append(value.content); env.document.body.append(note); return note;
   }]));
   stubs['easy-us'] = { Project: { create: value => value }, Script, h, $ui: ui, $modal: modal, $message: message,
     $gm: { unsafeWindow: env.window }, $store: { getTab: async () => ({}), setTab: async () => {} },
@@ -52,7 +53,7 @@ function setup(t, options = {}) {
   t.after(() => { env.window.dispatchEvent(new env.window.Event('pagehide')); env.window.close(); });
   function addRead(id, callback, data = { jobid: id }) {
     const frame = env.document.createElement('iframe'); frame.setAttribute('data', JSON.stringify(data)); env.document.body.append(frame);
-    frame.contentDocument.body.innerHTML = '<img id="img" class="imglook">'; frame.contentWindow.finishJob = callback;
+    frame.contentDocument.body.innerHTML = '<img id="img" class="imglook">'; frame.contentWindow.finishJob = () => { callback(); if (!options.noConfirm) { const item = env.window.attachments?.find(item => item.jobid === id); if (item) item.isPassed = true; } };
     return frame;
   }
   return { ...env, clock, api, cfg, messages, alerts, jumps, addRead,
@@ -122,16 +123,38 @@ function addMedia(e, id, extra = '') {
   const media = frame.contentDocument.querySelector('video');
   let calls = 0, paused = true;
   Object.defineProperties(media, { paused: { get: () => paused }, ended: { get: () => false } });
+  media.addEventListener('ended', () => { const item = e.window.attachments?.find(item => item.jobid === id); if (item) item.isPassed = true; });
   media.currentTime = 43;
   media.play = async () => { calls++; paused = false; };
   media.pause = () => { paused = true; };
   return { frame, media, get calls() { return calls; } };
 }
 function mediaAttachment(id) { const value = attachment(id); value.property.module = 'insertvideo'; return value; }
+test('a pause during an in-flight play request resumes through the actual chapter runner', async t => {
+  const e = setup(t, { attachments: [mediaAttachment('video')], cfg: { mode: 'manually' } });
+  const player = addMedia(e, 'video'), play = player.media.play;
+  let rejectPlay, attempts = 0;
+  player.media.play = () => {
+    if (++attempts === 1) return new Promise((resolve, reject) => { rejectPlay = reject; });
+    return play();
+  };
+  const task = e.start(); await e.clock.advance(3500); assert.equal(attempts, 1);
+  player.media.pause(); player.media.dispatchEvent(new e.window.Event('pause'));
+  rejectPlay(new player.frame.contentWindow.DOMException('play interrupted by pause', 'AbortError'));
+  await e.clock.advance(1500);
+  assert.equal(attempts, 2); assert.equal(player.media.paused, false); assert.equal(player.media.currentTime, 43);
+  assert.equal(e.window.currentMedia, player.media); assert.equal(e.jumps.length, 0);
+  assert.equal(e.messages.some(message => message.type === 'error'), false);
+  player.media.pause();
+  for (let i = 0; i < 3; i++) player.media.dispatchEvent(new e.window.Event('pause'));
+  await e.clock.advance(300); assert.equal(attempts, 3); assert.equal(player.media.paused, false);
+  player.media.dispatchEvent(new e.window.Event('ended')); await e.clock.advance(8000); await task;
+  assert.equal(e.window.currentMedia, undefined); assert.equal(e.clock.timers.size, 0);
+});
 test('actual media error pauses the chapter and clears the top-level player reference', async t => {
   const e = setup(t, { html: chapterParams, attachments: [mediaAttachment('video')] }), player = addMedia(e, 'video');
   const task = e.start(); await e.clock.advance(4000); assert.equal(player.calls, 1); assert.equal(player.media.currentTime, 43);
-  Object.defineProperty(player.media, 'error', { value: { code: 2 } });
+  Object.defineProperty(player.media, 'error', { value: { code: 4 } });
   player.media.dispatchEvent(new e.window.Event('error')); await e.clock.advance(1000); await task;
   assert.equal(e.jumps.length, 0); assert.match(e.messages.find(message => message.type === 'error').content, /加载失败/);
   assert.equal(e.window.currentMedia, undefined); assert.equal(e.clock.timers.size, 0);
@@ -165,5 +188,60 @@ test('missing AI configuration for a required chapter test is not reported as ta
   frame.contentDocument.body.innerHTML = '<div class="TiMu"></div>';
   const task = e.start(); await e.clock.advance(20000); await task;
   assert.equal(e.jumps.length, 0); assert.match(e.messages.find(message => message.type === 'error').content, /未配置可用 AI/);
+  assert.equal(e.clock.timers.size, 0);
+});
+
+test('unconfirmed read completion prevents navigation and exposes a retry control', async t => {
+  const e = setup(t, { html: chapterParams, noConfirm: true, attachments: [attachment('read')] });
+  let reads = 0; e.addRead('read', () => reads++); const task = e.start();
+  await e.clock.advance(45000); await task;
+  assert.equal(reads, 1); assert.equal(e.jumps.length, 0);
+  assert.match(e.messages.find(message => message.type === 'error').content, /平台尚未确认/);
+  const retry = Array.from(e.document.querySelectorAll('button')).find(el => el.textContent === '重试当前页面');
+  assert.equal(retry.hidden, false); assert.equal(e.clock.timers.size, 0);
+});
+test('confirmation arriving late releases the actual task without running it twice', async t => {
+  const e = setup(t, { html: chapterParams, noConfirm: true, attachments: [attachment('read')] });
+  let reads = 0; e.addRead('read', () => reads++); const task = e.start();
+  await e.clock.advance(10000); assert.equal(e.jumps.length, 0); assert.equal(reads, 1);
+  e.window.attachments[0].isPassed = true; await e.clock.advance(12000); await task;
+  assert.equal(e.jumps.length, 1); assert.equal(reads, 1); assert.equal(e.clock.timers.size, 0);
+});
+test('study pause and stop controls prevent chapter navigation and retry starts one new runner', async t => {
+  const e = setup(t, { html: chapterParams }), task = e.start();
+  await e.clock.advance(7000);
+  const button = text => Array.from(e.document.querySelectorAll('button')).find(el => el.textContent === text);
+  button('暂停学习').click(); await e.clock.advance(20000); assert.equal(e.jumps.length, 0);
+  button('继续学习').click(); await e.clock.advance(1000); assert.equal(e.jumps.length, 0);
+  button('停止学习').click(); await e.clock.flush(); await task;
+  assert.equal(e.clock.timers.size, 0); button('重试当前页面').click(); await e.clock.advance(15000);
+  assert.equal(e.jumps.length, 1); assert.equal(e.document.querySelectorAll('.study-controls').length, 1);
+  assert.equal(e.clock.timers.size, 0);
+});
+test('unknown chapter status cannot be counted as a completed course', async t => {
+  const e = setup(t, { html: chapter('one', true, 0) + chapter('two', false, 0), cfg: {mode:'job'} });
+  e.document.querySelector('#two input').remove(); const task = e.start();
+  await e.clock.advance(20000); await task;
+  assert.equal(e.jumps.length, 0); assert.match(e.messages.find(message => message.type === 'error').content, /未完成任务数尚未就绪/);
+});
+
+test('offline native errors recover despite the player generic format-or-network overlay', async t => {
+  const e = setup(t, { attachments: [mediaAttachment('video')], cfg: { mode: 'manually' } });
+  const player = addMedia(e, 'video', '<div class="vjs-modal-dialog-content"></div>');
+  const modal = player.frame.contentDocument.querySelector('.vjs-modal-dialog-content');
+  let online = true, error = null, loads = 0;
+  Object.defineProperty(player.frame.contentWindow.navigator, 'onLine', { get: () => online });
+  Object.defineProperties(player.media, { error: { get: () => error }, readyState: { get: () => 4 }, duration: { get: () => 100 } });
+  player.media.load = () => { loads++; error = null; player.media.currentTime = 0; };
+  const task = e.start(); await e.clock.advance(4500); assert.equal(player.calls, 1);
+  online = false; error = { code: 4 }; player.media.pause();
+  modal.innerText = '视频因格式不支持或者服务器或网络的问题无法加载。';
+  player.media.dispatchEvent(new e.window.Event('error')); await e.clock.advance(5000);
+  assert.equal(e.messages.some(message => message.type === 'error'), false);
+  assert.equal(loads, 0); assert.equal(player.calls, 1); assert.equal(e.jumps.length, 0);
+  online = true; await e.clock.advance(4500);
+  assert.equal(loads, 1); assert.equal(player.media.paused, false); assert.equal(player.media.currentTime, 43);
+  assert.equal(e.messages.some(message => message.type === 'error'), false);
+  player.media.dispatchEvent(new e.window.Event('ended')); await e.clock.advance(8000); await task;
   assert.equal(e.clock.timers.size, 0);
 });

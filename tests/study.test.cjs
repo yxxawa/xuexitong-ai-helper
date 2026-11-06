@@ -25,10 +25,10 @@ function mediaSetup(t, options = {}) {
   media.play = async () => { calls++; paused = false; };
   media.pause = () => { paused = true; stops++; };
   const settings = { playbackRate: 1.5, volume: 0.2 };
-  const api = loadTS(MEDIA, e.globals);
-  const controller = new AbortController();
+  const api = loadTS(MEDIA, e.globals, { './study': e.api });
+  const controller = options.controlled ? new e.api.StudyControl() : new AbortController();
   const task = capture(api.runStudyMedia(media, { signal: controller.signal, settings: () => settings,
-    play: async play => { await play(); return true; }, ...options }));
+    play: async play => { await play(); return true; }, maxRecoveries: 0, ...options }));
   return { ...e, media, settings, task, controller, get calls() { return calls; }, get stops() { return stops; },
     pause() { paused = true; media.dispatchEvent(new e.window.Event('pause')); },
     end() { ended = true; media.dispatchEvent(new e.window.Event('ended')); } };
@@ -105,6 +105,39 @@ test('playback preserves resume time, serializes repeated pause events and uses 
   e.pause(); e.pause(); e.pause(); await e.clock.advance(300);
   assert.equal(e.calls, 2); assert.equal(e.media.playbackRate, 1); assert.equal(e.media.volume, 0.7);
   e.end(); await e.task.promise; assert.equal(e.task.error, undefined); assert.equal(e.clock.timers.size, 0);
+});
+test('an interrupted play request retries even without a pause event and preserves the resume position', async t => {
+  const e = mediaSetup(t), play = e.media.play;
+  let attempts = 0;
+  e.media.play = async () => {
+    if (++attempts === 1) throw new e.window.DOMException('play interrupted by pause', 'AbortError');
+    await play();
+  };
+  await e.clock.advance(1500);
+  assert.equal(e.task.done, false); assert.equal(attempts, 2); assert.equal(e.media.paused, false);
+  assert.equal(e.media.currentTime, 57);
+  e.end(); await e.task.promise; assert.equal(e.task.error, undefined); assert.equal(e.clock.timers.size, 0);
+});
+test('persistent play interruptions still time out instead of retrying forever', async t => {
+  const e = mediaSetup(t, { stallTimeout: 3000 }); let attempts = 0;
+  e.media.play = async () => { attempts++; throw new e.window.DOMException('interrupted', 'AbortError'); };
+  await e.clock.advance(4000); await e.task.promise;
+  assert.ok(attempts > 1); assert.match(e.task.error.message, /没有播放进展/);
+  assert.equal(e.clock.timers.size, 0);
+});
+test('cancelling an in-flight play request prevents retries after its AbortError', async t => {
+  const e = mediaSetup(t); let rejectPlay, attempts = 0;
+  e.media.play = () => { attempts++; return new Promise((resolve, reject) => { rejectPlay = reject; }); };
+  await e.clock.advance(300); e.controller.abort(); await e.task.promise;
+  rejectPlay(new e.window.DOMException('interrupted', 'AbortError'));
+  await e.clock.advance(3000);
+  assert.ok(e.task.error); assert.equal(attempts, 1); assert.equal(e.stops, 1); assert.equal(e.clock.timers.size, 0);
+});
+test('permanent play failures are not retried as interruptions', async t => {
+  const e = mediaSetup(t); let attempts = 0;
+  e.media.play = async () => { attempts++; throw new e.window.DOMException('unsupported media', 'NotSupportedError'); };
+  await e.clock.advance(3000); await e.task.promise;
+  assert.equal(e.task.error.name, 'NotSupportedError'); assert.equal(attempts, 1); assert.equal(e.clock.timers.size, 0);
 });
 test('native media errors reject instead of advancing, including an already-present error', async t => {
   const e = mediaSetup(t); await e.clock.advance(300);
@@ -187,4 +220,92 @@ test('CSS-hidden or detached verification elements are not treated as active cha
   assert.equal(e.api.isStudyElementVisible(e.document.querySelector('.invisible')), false);
   const visible = e.document.querySelector('#visible'); assert.equal(e.api.isStudyElementVisible(visible), true);
   visible.remove(); assert.equal(e.api.isStudyElementVisible(visible), false);
+});
+
+test('pausing study immediately pauses playback and freezes the stall deadline until resume', async t => {
+  const e = mediaSetup(t, { controlled: true, stallTimeout: 3000 });
+  await e.clock.advance(1200); assert.equal(e.calls, 1);
+  e.controller.pause(); assert.equal(e.media.paused, true);
+  await e.clock.advance(6000); assert.equal(e.calls, 1); assert.equal(e.task.done, false);
+  e.controller.resume(); await e.clock.advance(300); assert.equal(e.calls, 2);
+  e.controller.stop(); await e.task.promise;
+  assert.ok(e.task.error); assert.equal(e.clock.timers.size, 0);
+});
+test('paused study keeps countdown time and cancellation releases its wait', async t => {
+  const e = setup(t), control = new e.api.StudyControl();
+  const task = capture(e.api.studySleep(3000, control.signal));
+  await e.clock.advance(1000); control.pause(); await e.clock.advance(10000);
+  assert.equal(task.done, false); control.resume(); await e.clock.advance(1900);
+  assert.equal(task.done, false); await e.clock.advance(200); await task.promise;
+  const stopped = capture(e.api.studySleep(3000, control.signal)); control.pause(); control.stop();
+  await stopped.promise; assert.equal(stopped.error.name, 'AbortError'); assert.equal(e.clock.timers.size, 0);
+});
+test('network errors reload a bounded number of times and restore only the previous position', async t => {
+  const e = mediaSetup(t, { maxRecoveries: 2 }); let error = null, loads = 0;
+  Object.defineProperties(e.media, { error: { get: () => error }, readyState: { get: () => 4 }, duration: { get: () => 100 } });
+  e.media.load = () => { loads++; error = null; e.media.currentTime = 0; };
+  await e.clock.advance(1200); error = { code: 2 }; e.media.dispatchEvent(new e.window.Event('error'));
+  await e.clock.advance(4000);
+  assert.equal(loads, 1); assert.equal(e.media.currentTime, 57); assert.equal(e.media.paused, false);
+  assert.equal(e.task.done, false); e.end(); await e.task.promise; assert.equal(e.clock.timers.size, 0);
+});
+test('persistent recoverable errors exhaust the limit and leave no retry timers', async t => {
+  const e = mediaSetup(t, { maxRecoveries: 2 }); let loads = 0;
+  Object.defineProperty(e.media, 'error', { get: () => ({ code: 2 }) });
+  e.media.load = () => { loads++; };
+  await e.clock.advance(12000); await e.task.promise;
+  assert.equal(loads, 2); assert.match(e.task.error.message, /自动恢复未成功/); assert.equal(e.clock.timers.size, 0);
+});
+test('replacement media is rebound and late events from the old element cannot finish the task', async t => {
+  let replacement, bound;
+  const e = mediaSetup(t, { maxRecoveries: 2, findMedia: () => replacement, onMediaChange: value => { bound = value; } });
+  await e.clock.advance(300); replacement = e.document.createElement('video');
+  let paused = true, plays = 0;
+  Object.defineProperties(replacement, { paused: { get: () => paused }, ended: { get: () => false }, readyState: { get: () => 4 }, duration: { get: () => 100 } });
+  replacement.play = async () => { plays++; paused = false; }; replacement.pause = () => { paused = true; };
+  e.media.replaceWith(replacement); await e.clock.advance(4500);
+  assert.equal(bound, replacement); assert.equal(plays, 1); assert.equal(replacement.currentTime, 57);
+  e.media.dispatchEvent(new e.window.Event('ended')); assert.equal(e.task.done, false);
+  replacement.dispatchEvent(new e.window.Event('ended')); await e.task.promise; assert.equal(e.clock.timers.size, 0);
+});
+test('completion requires explicit platform evidence including nested cards', async t => {
+  const e = setup(t, '<div class="ans-attach-ct"><iframe></iframe></div>');
+  const frame = e.document.querySelector('iframe'); frame.contentDocument.body.innerHTML = '<iframe></iframe>';
+  const nested = frame.contentDocument.querySelector('iframe');
+  assert.equal(e.api.studyTaskComplete(nested, {}), false);
+  e.document.querySelector('div').classList.add('ans-job-finished');
+  assert.equal(e.api.studyTaskComplete(nested, {}), true);
+  assert.equal(e.api.studyTaskComplete(frame, {isPassed:true}), true);
+  const control = new e.api.StudyControl(); let complete = false;
+  const task = capture(e.api.waitForStudyCompletion(() => complete, control.signal, 2000));
+  await e.clock.advance(1000); control.pause(); await e.clock.advance(5000); assert.equal(task.done, false);
+  complete = true; control.resume(); await e.clock.advance(500); await task.promise;
+  assert.equal(task.error, undefined); assert.equal(e.clock.timers.size, 0);
+});
+test('missing or malformed chapter counts are unknown, while the current completed icon is accepted', t => {
+  const e = setup(t, '<div><input class="jobUnfinishCount" value="2"></div>'), chapter = e.document.querySelector('div');
+  assert.equal(e.api.studyChapterRemaining(chapter), 2);
+  chapter.querySelector('input').value = ''; assert.ok(Number.isNaN(e.api.studyChapterRemaining(chapter)));
+  chapter.innerHTML = '<span class="icon_Completed"></span>'; assert.equal(e.api.studyChapterRemaining(chapter), 0);
+  chapter.innerHTML = ''; assert.ok(Number.isNaN(e.api.studyChapterRemaining(chapter)));
+});
+
+test('offline source failures are retried after reconnection even when the browser reports unsupported media', async t => {
+  const e = mediaSetup(t, { maxRecoveries: 2 }); let online = true, error = null, loads = 0;
+  Object.defineProperty(e.window.navigator, 'onLine', {get:()=>online});
+  Object.defineProperties(e.media, {error:{get:()=>error}, readyState:{get:()=>4}, duration:{get:()=>100}});
+  e.media.load = () => { loads++; error = null; e.media.currentTime = 0; };
+  await e.clock.advance(1200); online = false; error = {code:4}; e.pause();
+  e.media.dispatchEvent(new e.window.Event('error')); await e.clock.advance(5000);
+  assert.equal(e.task.done,false); assert.equal(loads,0); assert.equal(e.calls,1);
+  online = true; await e.clock.advance(4000);
+  assert.equal(loads,1); assert.equal(e.media.currentTime,57); assert.equal(e.media.paused,false);
+  e.end(); await e.task.promise; assert.equal(e.clock.timers.size,0);
+});
+test('starting offline waits for connectivity before making a playback request', async t => {
+  const e=mediaSetup(t); let online=false;
+  Object.defineProperty(e.window.navigator,'onLine',{get:()=>online});
+  await e.clock.advance(4000); assert.equal(e.calls,0); assert.equal(e.task.done,false);
+  online=true; await e.clock.advance(1500); assert.equal(e.calls,1);
+  e.end(); await e.task.promise; assert.equal(e.clock.timers.size,0);
 });

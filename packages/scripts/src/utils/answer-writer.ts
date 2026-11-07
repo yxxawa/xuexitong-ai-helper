@@ -40,6 +40,9 @@ export async function fillStandardAnswer(
 		return { finish: false };
 	const selected = new Set(writes.map(({ option }) => options.indexOf(option)));
 	if (selected.has(-1)) return { finish: false };
+	// Clearing old choices is part of the same write: validate those controls before the first click too.
+	if (type === 'multiple' && options.some((option, index) => !selected.has(index) && isOptionChecked(option) && !writable(option)))
+		return { finish: false };
 	const ready = async (option: HTMLElement) => {
 		await ctx.waitUntilReady?.();
 		ctx.assertCurrentQuestion?.();

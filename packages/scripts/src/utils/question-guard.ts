@@ -1,3 +1,5 @@
+import { cxQuestionTypeInput } from './cx-question';
+
 /** Read partial answers too: a single checked box or one edited blank must be preserved. */
 function answerState(root: HTMLElement) {
 	const controls = Array.from(
@@ -37,15 +39,18 @@ function answerState(root: HTMLElement) {
 
 /** Separate question identity from answer state so our own writes do not invalidate the question. */
 export function createQuestionWriteGuard(root: HTMLElement, describe: () => unknown) {
-	const identity = () =>
-		JSON.stringify([
+	const identity = () => {
+		const inputs = Array.from(root.querySelectorAll<HTMLInputElement>('input'));
+		const typeInput = cxQuestionTypeInput(inputs);
+		return JSON.stringify([
 			root.id,
 			root.getAttribute('data-questionid'),
-			Array.from(root.querySelectorAll<HTMLInputElement>('input'))
-				.filter((input) => /questionid|question_id|answertype|^type\d*/i.test(input.name || input.id))
+			inputs
+				.filter((input) => input === typeInput || /questionid|question_id/i.test(input.name + ' ' + input.id))
 				.map((input) => [input.name, input.id, input.value]),
 			describe()
 		]);
+	};
 	const question = identity();
 	const answer = answerState(root);
 	const assertQuestion = () => {

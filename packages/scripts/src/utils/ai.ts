@@ -330,7 +330,8 @@ export async function queryAIAnswerer(
 					resolveAIAnswer(rawContent, question.type),
 					question.type,
 					question.lineOptions,
-					options
+					options,
+					{ solution, rawContent, response }
 				);
 				retryInfo = { format_retry: true };
 			} catch (error) {
@@ -912,13 +913,19 @@ export function normalizeAnswerByQuestionType(
 		const exactOption = options.some(
 			(option) => compactPromptText(option).toLowerCase() === compactPromptText(clean).toLowerCase()
 		);
-		const tokens =
-			!exactOption && /^[A-Z](?:[\s,#，、;；|/]*[A-Z])*$/i.test(clean)
-				? clean.replace(/[^a-z]/gi, '').split('')
-				: clean
-						.split(/[#，、,；;|/\n]+/)
-						.map((item) => item.trim())
-						.filter(Boolean);
+		const parsed = parseAIObject(context.rawContent);
+		const parts = Array.isArray(parsed) ? parsed : parsed?.answers ?? parsed?.data?.answers;
+		const structured = Array.isArray(parts) ? parts.map(pickAnswerFromObject) : undefined;
+		const separated = clean.split(clean.includes('#') ? /#/ : /[，、,；;|\n]+/).map((item) => item.trim());
+		const tokens = structured?.length && structured.every(Boolean) && structured.join('#') === answer
+			? structured
+			: exactOption
+			? [clean]
+			: separated.length > 1 && separated.every((part) => normalizeSingleAnswer(part, options))
+			? separated
+			: /^[A-Z](?:[\s,#，、;；|/]*[A-Z])*$/i.test(clean)
+			? clean.replace(/[^a-z]/gi, '').split('')
+			: clean.split(clean.includes('#') ? /#/ : /[，、,；;|/\n]+/).map((item) => item.trim());
 		const letters = tokens.map((token) => normalizeSingleAnswer(token, options));
 		if (!letters.length || letters.some((letter) => !isChoiceLetterInRange(letter, options.length || 26))) return '';
 		return Array.from(new Set(letters)).sort().join('#');
@@ -929,26 +936,20 @@ export function normalizeAnswerByQuestionType(
 		return answer.replace(/^答案[:：]\s*/g, '').trim();
 	}
 	if (isJudgementQuestion(type)) {
+		const clean = answer.replace(/^(?:(?:正确|最终)?答案|判断)\s*[:：]\s*/, '').replace(/[。.!！\s]+$/g, '').trim();
 		const truth = (text: string) =>
-			/^(正确|对|是|√|true|yes)$/i.test(text.trim())
+			/^(正确|正確|对|對|是|√|✓|true|yes|t|1)$/i.test(text.trim())
 				? true
-				: /^(错误|错|否|×|false|no)$/i.test(text.trim())
+				: /^(错误|錯誤|错|錯|否|×|✗|x|false|no|f|0)$/i.test(text.trim())
 				? false
 				: undefined;
-		const value = truth(answer);
+		const value = truth(clean);
 		if (value !== undefined) {
 			const index = options.findIndex((option) => truth(option.replace(/^[A-Z][.．、]\s*/i, '')) === value);
 			if (index >= 0) return String.fromCharCode(65 + index);
+			return options.length ? '' : value ? '正确' : '错误';
 		}
-		return normalizeSingleAnswer(
-			answer
-				.replace(/^答案[:：]\s*/g, '')
-				.replace(/^判断[:：]\s*/g, '')
-				.replace(/[。.!！\s]+$/g, '')
-				.trim(),
-			options,
-			context
-		);
+		return normalizeSingleAnswer(clean, options, context);
 	}
 	if (isLineQuestion(type)) {
 		return normalizeLineAnswer(answer, lineOptions);
@@ -1020,6 +1021,7 @@ type AIAnswerContext = {
 
 function normalizeSingleAnswer(answer: string, options: string[] = [], _context: AIAnswerContext = {}) {
 	const literal = answer.replace(/^(?:(?:正确|最终)?答案|选项)\s*(?:是|为|[:：])?\s*/, '').trim();
+	if (!literal) return '';
 	const clean = literal.replace(/[。.\s]+$/g, '').trim();
 	const optionCount = options.length || 26;
 	if (/^[A-Z]$/i.test(literal))
@@ -1672,7 +1674,8 @@ async function queryWebAnswerer(
 			resolveAIAnswer(rawContent, question.type),
 			question.type,
 			question.lineOptions,
-			options
+			options,
+			{ rawContent }
 		);
 		const solution = normalizeAISolution(resolveAISolution(rawContent, {}));
 		return [

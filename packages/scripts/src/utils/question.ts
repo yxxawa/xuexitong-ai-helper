@@ -27,6 +27,12 @@ const NON_QUESTION_CONTENT = [
 	'noscript',
 	'[hidden]',
 	'[data-xth-image-ref]',
+	// Checked icons and native choice controls are answer state, not stem/option content.
+	// Their backgrounds (and child SVGs/images) may change after every click.
+	'input[type="radio"]',
+	'input[type="checkbox"]',
+	'.num_option',
+	'.num_option_dx',
 	'.edui-editor-toolbarbox',
 	'.edui-toolbar',
 	'[role="toolbar"]',
@@ -36,6 +42,16 @@ const NON_QUESTION_CONTENT = [
 	'.xth-programming-run-note',
 	'.xth-answer-review'
 ].join(',');
+
+/** Exam mark actions are UI chrome; keep their icons and captions out of both text and images. */
+function isQuestionMarkControl(element: Element): boolean {
+	// A selectable answer may itself be named “标记”; it is never the exam toolbar action.
+	if (element.closest('.answerBg,.answer_p,.after,.reading_answer,.filling_answer,.firstUlList,.secondUlList')) return false;
+	if (!element.matches('button,a[href^="javascript:"],a[href="#"],a:not([href]),[role="button"],[onclick],.marking,.mark'))
+		return false;
+	const label = element.textContent?.trim() || element.getAttribute('aria-label') || element.getAttribute('title') || '';
+	return /^(?:取消|已|添加)?(?:标记|標記)(?:此题|本题|此題|本題)?$/.test(label.replace(/\s+/g, ''));
+}
 
 /**
  * Ignore visually hidden templates and editor chrome, including hidden ancestors.
@@ -48,6 +64,7 @@ export function isQuestionContentElement(element: Element, cache = new Map<Eleme
 	const style = element.ownerDocument.defaultView?.getComputedStyle(element);
 	const visible =
 		!element.matches(NON_QUESTION_CONTENT) &&
+		!isQuestionMarkControl(element) &&
 		style?.display !== 'none' &&
 		style?.visibility !== 'hidden' &&
 		style?.visibility !== 'collapse' &&

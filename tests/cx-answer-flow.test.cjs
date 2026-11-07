@@ -69,7 +69,7 @@ test('hidden answer text is omitted without mutating the live question', t => {
 });
 
 function cxSetup(t, html, settings = {}) {
-  const env = domRuntime(html, 'https://mooc1.chaoxing.com/mooc2/work/dowork'); t.after(() => env.window.close());
+  const env = domRuntime(html, settings.url || 'https://mooc1.chaoxing.com/mooc2/work/dowork'); t.after(() => env.window.close());
   const clock = new Clock(), queries = [], tasks = [], messages = [], reviews = []; let workOptions;
   const globals = { ...env.globals, ...clock.globals(), top: env.window, AbortController, queueMicrotask };
   const noop = () => {}, easy = { CommonEventEmitter: EventEmitter, $: { sleep: async () => {} } };
@@ -110,6 +110,155 @@ function cxSetup(t, html, settings = {}) {
   } };
 }
 const choices = '<div class="answerBg"><li><input type="radio" name="a" id="a"><label class="answer_p" for="a">第一项</label></li><li><input type="radio" name="a" id="b"><label class="answer_p" for="b">第二项</label></li></div>';
+
+
+// Selection chrome changes after the platform saves a choice; it is not question content.
+for (const renderer of ['native', 'legacy']) for (const type of ['single', 'multiple', 'judgement']) {
+  test('exam ' + type + ' completes when ' + renderer + ' selection icons change', async t => {
+    const multiple = type === 'multiple', answer = multiple ? 'A#C' : 'B';
+    const labels = type === 'judgement' ? ['正确', '错误'] : ['第一项', '第二项', '第三项'];
+    const typeValue = multiple ? 1 : type === 'judgement' ? 3 : 0;
+    const rows = labels.map((label, index) => {
+      const letter = String.fromCharCode(65 + index);
+      const marker = renderer === 'native'
+        ? '<input type="' + (multiple ? 'checkbox' : 'radio') + '" name="answer1" id="choice' + letter + '" value="' + letter + '">'
+        : '<span class="' + (multiple ? 'num_option_dx' : 'num_option') + '">' + letter + '.</span>';
+      return '<li>' + marker + '<label class="answer_p" for="choice' + letter + '">' + label + '</label></li>';
+    }).join('');
+    const e = cxSetup(t, '<div class="questionLi" id="q1"><h3>1. 选择正确答案</h3><input type="hidden" name="type1" value="' + typeValue + '"><input type="hidden" name="answer" value=""><div class="answerBg">' + rows + '</div></div>', {
+      url: 'https://mooc1.chaoxing.com/mooc2/exam/preview', query: () => infos(answer)
+    });
+    const markers = [...e.document.querySelectorAll('.answerBg input,.num_option,.num_option_dx')];
+    const selected = () => markers.flatMap((marker, index) =>
+      (renderer === 'native' ? marker.checked : marker.classList.contains('check_answer')) ? [String.fromCharCode(65 + index)] : []);
+    for (const marker of markers) {
+      marker.style.backgroundImage = 'url("https://static.example.test/unchecked.svg")';
+      const target = renderer === 'native' ? marker : marker.parentElement.querySelector('.answer_p');
+      target.addEventListener(renderer === 'native' ? 'change' : 'click', () => {
+        if (renderer === 'legacy') marker.classList.toggle('check_answer');
+        marker.style.backgroundImage = 'url("https://static.example.test/checked.svg")';
+        e.document.querySelector('[name="answer"]').value = selected().join('');
+      });
+    }
+    const { results } = await e.start();
+    assert.deepEqual(selected(), answer.split('#'));
+    assert.equal(results[0].error, undefined);
+    assert.equal(results[0].result.finish, true);
+    assert.equal(e.queries[0].type, type);
+    assert.deepEqual(e.queries[0].options, labels);
+    assert.deepEqual(e.queries[0].imageUrls, []);
+    assert.equal(e.reviews[0].snapshot().answer, answer);
+  });
+}
+
+for (const representation of ['img', 'background']) test('choice chrome is excluded while real ' + representation + ' option images remain guarded', async t => {
+  let resolveAnswer;
+  const picture = representation === 'img' ? '<img class="figure" src="' + PNG + '">' : '<span class="figure" style="background-image:url(&quot;' + PNG + '&quot;)"></span>';
+  const e = cxSetup(t, '<div class="questionLi" id="q1"><h3>1. 选择正确图形</h3><input type="hidden" name="type1" value="0"><div class="answerBg"><li><span class="num_option"><img src="https://static.example.test/radio.png"><svg><path d="M0 0L1 1"></path></svg>A.</span><input type="radio" name="answer1" id="a"><label class="answer_p" for="a">甲</label>' + picture + '</li><li><span class="num_option_dx">B.</span><input type="radio" name="answer1" id="b"><label class="answer_p" for="b">乙</label></li></div></div>', {
+    url: 'https://mooc1.chaoxing.com/mooc2/exam/preview', query: () => new Promise(resolve => { resolveAnswer = resolve; })
+  });
+  const running = e.start(); await e.clock.flush();
+  assert.deepEqual(e.queries[0].imageUrls, [PNG]);
+  assert.deepEqual(e.queries[0].options, ['甲[图片1]', '乙']);
+  const figure = e.document.querySelector('.figure');
+  if (representation === 'img') figure.src = GIF;
+  else figure.style.backgroundImage = 'url("' + GIF + '")';
+  resolveAnswer(infos('A')); await e.clock.advance(1000);
+  const { results } = await running;
+  assert.equal(results[0].result.finish, false);
+  assert.match(results[0].error, /已变化/);
+  assert.equal(e.document.querySelector(':checked'), null);
+});
+
+test('a real option change after the first exam multiselect write still stops further writes', async t => {
+  const e = cxSetup(t, '<div class="questionLi" id="q1"><h3>1. 多选题</h3><input type="hidden" name="type1" value="1">' + choices.replaceAll('type="radio"', 'type="checkbox"') + '</div>', {
+    url: 'https://mooc1.chaoxing.com/mooc2/exam/preview', query: () => infos('A#B')
+  });
+  e.document.querySelector('#a').addEventListener('change', () => {
+    e.document.querySelector('[for="b"]').textContent = '新选项';
+  });
+  const { results } = await e.start();
+  assert.equal(results[0].result.finish, false);
+  assert.match(results[0].error, /已变化/);
+  assert.equal(e.document.querySelector('#a').checked, true);
+  assert.equal(e.document.querySelector('#b').checked, false);
+});
+
+
+for (const renderer of ['link', 'inline-button', 'custom']) test('exam mark action does not become a question image or invalidate a pending answer: ' + renderer, async t => {
+  let resolveAnswer;
+  const control = renderer === 'link'
+    ? '<a id="mark" href="javascript:void(0)"><img src="' + PNG + '">标记</a>'
+    : renderer === 'inline-button'
+    ? '<button id="mark" type="button" style="background-image:url(&quot;' + PNG + '&quot;)">标记</button>'
+    : '<div id="mark" class="marking"><svg><path d="M0 0L1 1"></path></svg>标记</div>';
+  const heading = '<h3>1. 选择正确答案' + (renderer === 'inline-button' ? control : '') + '</h3>';
+  const footer = renderer === 'inline-button' ? '' : '<div class="question-actions">' + control + '</div>';
+  const e = cxSetup(t, '<div class="questionLi" id="q1">' + heading + '<input type="hidden" name="type1" value="0">' + choices + footer + '</div>', {
+    url: 'https://mooc1.chaoxing.com/mooc2/exam/preview', query: () => new Promise(resolve => { resolveAnswer = resolve; })
+  });
+  const running = e.start(); await e.clock.flush();
+  const query = e.queries[0];
+  assert.equal(query.title, '选择正确答案');
+  assert.deepEqual(query.imageUrls, []);
+  assert.equal(query.hasImage, false);
+  const mark = e.document.querySelector('#mark');
+  assert.equal(mark.textContent, '标记');
+  mark.innerHTML = '<img src="' + GIF + '">取消标记';
+  resolveAnswer(infos('A')); await e.clock.advance(1000);
+  const { results } = await running;
+  assert.equal(results[0].error, undefined);
+  assert.equal(results[0].result.finish, true);
+  assert.equal(e.document.querySelector('#a').checked, true);
+  assert.equal(mark.textContent, '取消标记');
+});
+
+test('real exam images and the word 标记 in stems and options survive mark-control filtering', async t => {
+  const e = cxSetup(t, '<div class="questionLi" id="q1"><a href="#" onclick="return false"><img src="' + GIF + '">已标记</a><h3 class="mark_name">1. 标记<img src="' + PNG + '"></h3><p>图中的标记表示什么？</p><input type="hidden" name="type1" value="0">' + choices.replace('第一项', '标记') + '</div>', {
+    url: 'https://mooc1.chaoxing.com/mooc2/exam/preview'
+  });
+  const { results } = await e.start();
+  assert.equal(e.queries[0].title, '标记[图片1] 图中的标记表示什么？');
+  assert.deepEqual(e.queries[0].imageUrls, [PNG]);
+  assert.deepEqual(e.queries[0].options, ['标记', '第二项']);
+  assert.equal(results[0].result.finish, true);
+});
+
+
+for (const noise of ['type', 'typeFlag']) test('exam question-specific type wins over the earlier ' + noise + ' input', async t => {
+  const e = cxSetup(t, '<div class="questionLi" id="q1"><h3>1. 选择所有符合条件的选项</h3><input type="hidden" name="' + noise + '" value="0"><input type="hidden" name="type1" value="1">' + choices.replaceAll('type="radio"', 'type="checkbox"') + '</div>', {
+    url: 'https://mooc1.chaoxing.com/mooc2/exam/preview', query: () => infos('A#B')
+  });
+  const { results } = await e.start();
+  assert.equal(e.queries[0].type, 'multiple');
+  assert.equal(results[0].result.finish, true);
+  assert.equal(e.document.querySelectorAll(':checked').length, 2);
+});
+
+test('refreshing an exam type helper does not invalidate the real question type', async t => {
+  let resolve;
+  const e = cxSetup(t, '<div class="questionLi" id="q1"><h3>1. 选择正确答案</h3><input type="hidden" name="type1" value="0"><input type="hidden" name="typeFlag" value="0">' + choices + '</div>', {
+    url: 'https://mooc1.chaoxing.com/mooc2/exam/preview', query: () => new Promise(done => { resolve = done; })
+  });
+  const running = e.start(); await e.clock.flush();
+  e.document.querySelector('[name="typeFlag"]').value = '1';
+  resolve(infos('B')); await e.clock.advance(1000);
+  const { results } = await running;
+  assert.equal(results[0].error, undefined);
+  assert.equal(results[0].result.finish, true);
+  assert.equal(e.document.querySelector('#b').checked, true);
+});
+
+test('an interactive answer option named 标记 is still question content', async t => {
+  const e = cxSetup(t, '<div class="questionLi" id="q1"><h3>1. 选择正确术语</h3><input type="hidden" name="type1" value="0"><div class="answerBg"><li><span class="answer_p" onclick="saveChoice()">标记</span></li><li><span class="answer_p" onclick="saveChoice()">保存</span></li></div></div>', {
+    url: 'https://mooc1.chaoxing.com/mooc2/exam/preview', query: () => infos('A')
+  });
+  const options = [...e.document.querySelectorAll('.answer_p')];
+  options.forEach(option => option.addEventListener('click', () => option.setAttribute('aria-checked', 'true')));
+  const { results } = await e.start();
+  assert.deepEqual(e.queries[0].options, ['标记', '保存']);
+  assert.equal(results[0].result.finish, true);
+});
 
 test('the actual AI payload includes every stem paragraph outside h3 and excludes the answer area', async t => {
   const e = cxSetup(t, '<div class="questionLi" id="q1"><h3>1.（单选题）请根据以下材料作答</h3><p>关键材料：甲的速度是乙的两倍。</p><p>问题：甲乙谁更快？</p><input id="answertype1" value="0">' + choices + '</div>');

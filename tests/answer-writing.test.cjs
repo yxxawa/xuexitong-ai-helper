@@ -145,3 +145,13 @@ test('a blank with only an upload control rejects the whole fill before changing
   assert.equal((await e.api.fillStandardAnswer(e.ctx,'completion',delay)).finish,false);
   assert.equal(e.root.querySelector('textarea').value,'');
 });
+
+test('all stale multiselect choices are validated before clearing any of them', async t => {
+  const e = setup(t, choices('checkbox'), 'C');
+  e.root.querySelector('#o0').checked = true;
+  e.root.querySelector('#o1').checked = true;
+  e.root.querySelector('#o1').disabled = true;
+  const result = await e.api.fillStandardAnswer(e.ctx, 'multiple', delay);
+  assert.equal(result.finish, false);
+  assert.deepEqual([...e.root.querySelectorAll(':checked')].map(input => input.id), ['o0', 'o1']);
+});

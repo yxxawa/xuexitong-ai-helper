@@ -86,12 +86,19 @@ export function getQuestionType(value: number): CXQuestionType | undefined {
 	if (value === 17) return 'programming';
 }
 
+/** Numbered fields belong to this question; bare type/typeFlag inputs may describe the exam UI. */
+export function cxQuestionTypeInput(inputs: HTMLInputElement[]): HTMLInputElement | undefined {
+	return inputs.find((input) => /^(?:answertype|type)\d+$/i.test(input.name) || /^(?:answertype|type)\d+$/i.test(input.id)) ||
+		inputs.find((input) => /^(?:answertype|type)$/i.test(input.name) || /^(?:answertype|type)$/i.test(input.id));
+}
+
 export function resolveQuestionType(
 	elements: { type?: HTMLElement[]; options?: HTMLElement[] },
 	ctx?: { type?: CXQuestionType; root?: HTMLElement },
 	title = ''
 ): CXQuestionType | undefined {
-	const typeInput = elements.type?.[0] as HTMLInputElement | undefined;
+	const inputs = (elements.type || []) as HTMLInputElement[];
+	const typeInput = cxQuestionTypeInput(inputs) || inputs[0];
 	const parsed = typeInput ? getQuestionType(Number(typeInput.value.trim() || NaN)) : undefined;
 	if (parsed) return parsed;
 	// Specific matching markup must win over generic textarea/radio heuristics.

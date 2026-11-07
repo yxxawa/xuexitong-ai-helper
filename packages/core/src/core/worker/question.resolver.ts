@@ -27,6 +27,13 @@ export function createDefaultQuestionResolver<E>(
 			}
 
 			const semanticAnswers = allAnswer.filter((answer) => isPurePlainAnswer(answer) === false);
+			// Preserve meaningful formula punctuation before similarity removes it (for example 2 versus -2).
+			const exactOptions = answerExactMatch(semanticAnswers, optionStrings);
+			if (exactOptions.length === 1) {
+				const option = options[optionStrings.indexOf(exactOptions[0])];
+				await handler('single', exactOptions[0], option, ctx);
+				return { finish: true, option };
+			}
 			let ratings: Rating[] = [];
 			if (ctx.answerMatchMode === 'similar') {
 				/** 配对选项的相似度 */
@@ -115,12 +122,23 @@ export function createDefaultQuestionResolver<E>(
 				);
 
 				if (ctx.answerMatchMode === 'similar') {
+					const exact = answerExactMatch(answers, options.map((option) => removeRedundant(option.innerText)));
+					if (answers.length && answers.every((answer) => exact.includes(removeRedundant(answer)))) {
+						const matched = options.filter((option) => exact.includes(removeRedundant(option.innerText)));
+						similar_list[i] = {
+							options: matched,
+							answers: matched.map((option) => option.innerText),
+							ratings: matched.map(() => 1),
+							similarSum: matched.length,
+							similarCount: matched.length
+						};
+						continue;
+					}
 					const matchResult: SimilarResult = { options: [], answers: [], ratings: [], similarSum: 0, similarCount: 0 };
 					// 判断选项是否完全存在于答案里面
 					for (const option of options) {
-						const ans = answers.find((answer) =>
-							answer.includes(removeRedundant(option.textContent || option.innerText))
-						);
+						const text = removeRedundant(option.textContent || option.innerText);
+						const ans = text && answers.find((answer) => answer.includes(text));
 						if (ans) {
 							matchResult.options.push(option);
 							matchResult.answers.push(ans);
@@ -176,7 +194,7 @@ export function createDefaultQuestionResolver<E>(
 						// similarSum 是匹配精度，其结果决定同样数量的情况下，哪一个的精度更高
 
 						// 高到低排序
-						return bsc + bss - asc + ass;
+						return bsc + bss - (asc + ass);
 					});
 
 				if (sorted_similar_list[0]) {

@@ -40,7 +40,8 @@ import {
 	waitForElement, waitForMedia, assertStudyActive, studySleep, studyJobId, findStudyAttachment,
 	searchStudyFrames, runStudyJobs, isStudyElementVisible, isStudyContentEmpty, studyReaderTiming
 } from '../utils/study';
-import { runStudyMedia } from '../utils/study-media';
+import { applyStudyMediaSettings, runStudyMedia } from '../utils/study-media';
+import { runStudyReader } from '../utils/study-reader';
 import { StudyControl, studyControl, studyPaused, studyCheckpoint, studyStatus, studyTaskComplete, studyChapterRemaining, waitForStudyCompletion } from '../utils/study';
 import { mountStudyControls } from '../utils/study-controls';
 import { createVideoQuizController } from '../utils/video-quiz';
@@ -332,52 +333,15 @@ export const CXProject = Project.create({
 			async onactive() {
 				/** iframe 跨域问题， 必须在 iframe 中执行 ， 所以脱离学习脚本运行。 */
 				if (/\/readsvr\/book\/mooc/.test(location.href)) {
-					// 26年上半学期新阅读任务点，计时翻页，达到一定时间才能翻下一页，这里等待时间然后执行翻页完成任务。
-					if (document.querySelector('#reader')) {
-						// @ts-ignore
-						require(['reader'], (_reader) => {
-							waitForElement('.readerPager').then(() => {
-								setTimeout(async () => {
-									const jumper = document.querySelector<HTMLSelectElement>('#pagejump');
-									if (_reader?.goPage && jumper) {
-										// 等待时间
-										const timing = studyReaderTiming(location.href, document.baseURI) + 3;
-										console.log(timing);
-										await $.sleep(timing * 1000);
-										/**
-											 *  1:书名页
-												2:版权页
-												3:前言页
-												4:目录页
-												5:正文275页
-												7:封底页
-											*/
-										jumper.value = '5';
-										jumper.dispatchEvent(new Event('change'));
-										console.log('已跳转正文页');
-										await $.sleep(timing * 1000);
-										jumper.value = '7';
-										jumper.dispatchEvent(new Event('change'));
-										console.log('已跳转封底页');
-										await $.sleep(timing * 1000);
-										Array.from(document.querySelectorAll<HTMLElement>('.readerPager'))
-											.filter((el) => el.style.zIndex === '101')[0]
-											.click();
-										console.log('阅读完成');
-									}
-								}, 3000);
-							});
-						});
-					}
-					// 普通阅读任务点，id 是 #ReadWeb
-					else {
-						console.log('正在完成书籍/PPT...');
-						setTimeout(() => {
-							// @ts-ignore
-							// eslint-disable-next-line no-undef
-							readweb.goto(epage);
-						}, 5000);
-					}
+					if (!this.cfg.enablePPT) return;
+					const controller = new AbortController();
+					const leave = () => controller.abort();
+					window.addEventListener('pagehide', leave, { once: true });
+					void runStudyReader($gm.unsafeWindow, controller.signal, () => this.cfg.enablePPT).catch((error) => {
+						if (!controller.signal.aborted && error?.name !== 'AbortError') {
+							$message.error({ content: '阅读已暂停：' + String(error?.message || error), duration: 0 });
+						}
+					}).finally(() => window.removeEventListener('pagehide', leave));
 					return;
 				}
 
@@ -386,10 +350,11 @@ export const CXProject = Project.create({
 					const updateMediaState = () => {
 						// @ts-ignore
 						if (top.currentMedia) {
-							// @ts-ignore 倍速设置
-							top.currentMedia.playbackRate = parseFloat(this.cfg.playbackRate.toString());
-							// @ts-ignore 音量设置
-							top.currentMedia.volume = this.cfg.volume;
+							// @ts-ignore 当前课程播放器位于任务 iframe 中
+							applyStudyMediaSettings(top.currentMedia, {
+								playbackRate: Number(this.cfg.playbackRate),
+								volume: this.cfg.volume
+							});
 						}
 					};
 
@@ -1506,7 +1471,11 @@ let studyNote: HTMLElement | undefined;
 export function study(opts: StudyOptions): Promise<void> {
 	if (activeStudy) return activeStudy;
 	const control = new StudyControl();
-	const restart = () => { void (activeStudy || Promise.resolve()).then(() => study(opts)); };
+	const restart = () => { void (activeStudy || Promise.resolve()).then(() => study({
+		...CXProject.scripts.study.cfg,
+		playbackRate: Number(CXProject.scripts.study.cfg.playbackRate),
+		workOptions: CommonProject.scripts.settings.methods.getWorkOptions()
+	})); };
 	studyNote?.remove();
 	studyNote = mountStudyControls(control, restart);
 	const leave = () => { control.stop(); studyNote?.remove(); };
@@ -1562,8 +1531,10 @@ async function studyChapter(opts: StudyOptions, signal: AbortSignal) {
 	top._preChapterId = '';
 
 	// 下一章
+	const manualNavigation = () => CXProject.scripts.study.cfg.mode === 'manually';
 	const next = async () => {
 		await studyCheckpoint(signal);
+		if (manualNavigation()) return;
 		if (CXAnalyses.isInFinalTab()) {
 			if (await CXAnalyses.isStuckInBreakingMode()) {
 				return $modal.alert({
@@ -1581,6 +1552,7 @@ async function studyChapter(opts: StudyOptions, signal: AbortSignal) {
 				content = '已经抵达最后一个章节，10秒后返回第一个章节重新开始。';
 				$message.info({ content, duration: 10 });
 				await studySleep(10 * 1000, signal);
+				if (manualNavigation()) return;
 				top?.document.querySelector<HTMLElement>('.posCatalog_name')?.click();
 
 			} else {
@@ -1618,6 +1590,7 @@ async function studyChapter(opts: StudyOptions, signal: AbortSignal) {
 			}
 			CXAnalyses.scrollToActiveChapter();
 			await studySleep(1000, signal);
+			if (manualNavigation()) return;
 			nextChapter.element.click();
 		} else if (CXProject.scripts.study.cfg.mode === 'next' || CXProject.scripts.study.cfg.mode === 'job') {
 			const curCourseId = $el<HTMLInputElement>('#curCourseId', top?.document);
@@ -1632,6 +1605,7 @@ async function studyChapter(opts: StudyOptions, signal: AbortSignal) {
 				CXAnalyses.scrollToActiveChapter();
 				// 等待跳转动画完成
 				await studySleep(200, signal);
+				if (manualNavigation()) return;
 
 				/**
 				 * count, chapterId, courseId, clazzid, knowledgestr, checkType
@@ -1878,7 +1852,8 @@ const JobRunner = {
 		doc: Document,
 		signal?: AbortSignal
 	) {
-		let media = await waitForMedia({ root: doc, signal });
+		const findMedia = () => doc.querySelector<HTMLMediaElement>('#video video,#audio audio,video#video,audio#audio') || undefined;
+		let media = await waitForMedia({ root: doc, signal, filter: (candidate) => candidate === findMedia() });
 		const { videojs } = domSearch({ videojs: '#video,#audio' }, doc);
 		if (!videojs) throw new Error('未找到播放器，请刷新或手动播放。');
 		state.study.videojs = videojs;
@@ -1903,7 +1878,7 @@ const JobRunner = {
 					volume: CXProject.scripts.study.cfg.volume
 				}),
 				play: (play, signal) => playMedia(play, signal),
-				findMedia: () => doc.querySelector<HTMLMediaElement>('#video video,#audio audio,video,audio') || undefined,
+				findMedia,
 				onMediaChange: (replacement) => {
 					media = replacement;
 					// @ts-ignore

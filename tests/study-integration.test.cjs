@@ -4,7 +4,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { ROOT, Clock, domRuntime, loadTS } = require('./helpers/runtime.cjs');
 function setup(t, options = {}) {
-  const env = domRuntime(options.html || '', 'https://mooc1.chaoxing.com/knowledge/cards');
+  const env = domRuntime(options.html || '', options.url || 'https://mooc1.chaoxing.com/knowledge/cards');
+  Object.assign(env.window, options.readerGlobals || {});
   const clock = new Clock(), messages = [], alerts = [], jumps = [];
   const noop = () => {};
   env.window.HTMLElement.prototype.scrollIntoView = noop;
@@ -14,7 +15,7 @@ function setup(t, options = {}) {
   // Isolate unrelated AI/UI dependencies, not the actual study implementation.
   const source = fs.readFileSync(path.join(ROOT, 'packages/scripts/src/projects/cx.ts'), 'utf8');
   for (const match of source.matchAll(/from ['"]([^'"]+)['"]/g)) stubs[match[1]] = {};
-  delete stubs['../utils/study-controls']; delete stubs['../utils/study']; delete stubs['../utils/study-media']; delete stubs['../utils/video-quiz'];
+  delete stubs['../utils/study-controls']; delete stubs['../utils/study']; delete stubs['../utils/study-media']; delete stubs['../utils/study-reader']; delete stubs['../utils/video-quiz'];
   class Script {
     constructor(options) {
       Object.assign(this, options);
@@ -45,7 +46,7 @@ function setup(t, options = {}) {
   stubs['@xuexitong-ai-helper/core/src/core/utils/dom'] = {
     domSearch: (selectors, root) => Object.fromEntries(Object.entries(selectors).map(([key, selector]) => [key, root.querySelector(selector)]))
   };
-  const globals = { ...env.globals, ...clock.globals(), AbortController, top: env.window, console: { ...console, info: noop, warn: noop, error: noop, debug: noop } };
+  const globals = { ...env.globals, ...clock.globals(), ...options.readerGlobals, AbortController, top: env.window, console: { ...console, info: noop, warn: noop, error: noop, debug: noop } };
   stubs['../utils'] = loadTS('packages/scripts/src/utils/index.ts', globals, { ...stubs, './work': {}, './ai': {} });
   const api = loadTS('packages/scripts/src/projects/cx.ts', globals, stubs);
   Object.assign(api.CXProject.scripts.study.cfg, options.cfg || {});
@@ -133,6 +134,49 @@ test('a task arriving during the empty-page countdown runs before navigation', a
   await e.clock.advance(20000); await task;
   assert.equal(calls, 1); assert.equal(e.jumps.length, 1);
   assert.equal(e.messages.some(message => message.type === 'error'), false); assert.equal(e.clock.timers.size, 0);
+});
+const observedEmptyCourseCard = fs.readFileSync(path.join(__dirname, 'fixtures/knowledge-empty.html'), 'utf8');
+for (const mode of ['next', 'job']) test(`the live empty card with hidden audition audio advances in ${mode} mode`, async t => {
+  const html = chapterParams + chapter('last', true, 1) + '<ul class="prev_ul"><li class="active">知识点</li><li>视频</li></ul>' + observedEmptyCourseCard;
+  const e = setup(t, { html, loading: true, cfg: { mode } });
+  const task = e.start(); await e.clock.advance(40000); await task;
+  assert.equal(e.jumps.length, 1); assert.equal(e.alerts.length, 0);
+  assert.equal(e.messages.some(message => message.type === 'error'), false); assert.equal(e.clock.timers.size, 0);
+});
+test('hidden course media arriving during the empty-card countdown prevents navigation', async t => {
+  const e = setup(t, { html: chapterParams + observedEmptyCourseCard, loading: true });
+  const task = e.start(); await e.clock.advance(7000);
+  const audio = e.document.createElement('audio'); audio.hidden = true;
+  e.document.querySelector('#pageDiv').append(audio);
+  await e.clock.advance(40000); await task;
+  assert.equal(e.jumps.length, 0); assert.match(e.messages.find(message => message.type === 'error').content, /任务列表加载超时/);
+  assert.equal(e.clock.timers.size, 0);
+});
+test('the observed empty course layout advances even with a hidden auxiliary iframe', async t => {
+  const e = setup(t, { html: chapterParams + observedEmptyCourseCard + '<iframe hidden></iframe>', loading: true });
+  const task = e.start(); await e.clock.advance(40000); await task;
+  assert.equal(e.jumps.length, 1); assert.equal(e.messages.some(message => message.type === 'error'), false);
+  assert.equal(e.clock.timers.size, 0);
+});
+test('an empty card inside a visible wrapper iframe advances after settling', async t => {
+  const e = setup(t, { html: chapterParams + '<iframe id="content"></iframe>', loading: true });
+  const frame = e.document.querySelector('iframe');
+  frame.contentWindow.HTMLElement.prototype.getClientRects = e.window.HTMLElement.prototype.getClientRects;
+  frame.contentDocument.body.innerHTML = observedEmptyCourseCard;
+  const task = e.start(); await e.clock.advance(40000); await task;
+  assert.equal(e.jumps.length, 1); assert.equal(e.messages.some(message => message.type === 'error'), false);
+  assert.equal(e.clock.timers.size, 0);
+});
+test('new nested task metadata cancels an empty-page jump instead of skipping the task', async t => {
+  const e = setup(t, { html: chapterParams + '<iframe id="content"></iframe>', loading: true });
+  const frame = e.document.querySelector('iframe');
+  frame.contentWindow.HTMLElement.prototype.getClientRects = e.window.HTMLElement.prototype.getClientRects;
+  frame.contentDocument.body.innerHTML = observedEmptyCourseCard;
+  const task = e.start(); await e.clock.advance(7000);
+  frame.contentWindow.attachments = [attachment('pending')];
+  await e.clock.advance(40000); await task;
+  assert.equal(e.jumps.length, 0); assert.match(e.messages.find(message => message.type === 'error').content, /任务列表加载超时/);
+  assert.equal(e.clock.timers.size, 0);
 });
 test('late metadata and an iframe mounted after twelve seconds are handled by the actual chapter runner', async t => {
   const e = setup(t, { loading: true, cfg: { mode: 'manually' } }); let calls = 0;
@@ -306,4 +350,74 @@ test('offline native errors recover despite the player generic format-or-network
   assert.equal(e.messages.some(message => message.type === 'error'), false);
   player.media.dispatchEvent(new e.window.Event('ended')); await e.clock.advance(8000); await task;
   assert.equal(e.clock.timers.size, 0);
+});
+
+// Non-assessment regression checks: all pages and platform calls below are local fixtures.
+test('retry uses the changed study settings after an unmounted media task times out', async t => {
+  const e = setup(t, { attachments: [mediaAttachment('video')], cfg: { mode: 'manually' } });
+  const first = e.start(); await e.clock.advance(40000); await first;
+  assert.equal(e.document.querySelector('.study-controls').dataset.phase, 'error');
+  e.cfg.enableMedia = false;
+  Array.from(e.document.querySelectorAll('button')).find(el => el.textContent === '重试当前页面').click();
+  await e.clock.advance(40000);
+  assert.equal(e.document.querySelector('.study-controls').dataset.phase, 'done');
+  assert.equal(e.messages.filter(message => message.type === 'error').length, 1);
+  assert.equal(e.jumps.length, 0); assert.equal(e.clock.timers.size, 0);
+});
+test('switching to manual mode during the next-page countdown finishes without navigation or errors', async t => {
+  const e = setup(t, { html: chapterParams }), task = e.start();
+  await e.clock.advance(7000); e.cfg.mode = 'manually';
+  await e.clock.advance(20000); await task;
+  assert.equal(e.jumps.length, 0); assert.equal(e.messages.some(message => message.type === 'error'), false);
+  assert.equal(e.document.querySelector('.study-controls').dataset.phase, 'done');
+});
+test('manual mode also cancels the delayed return to the first chapter', async t => {
+  const e = setup(t, { html: chapter('first', false, 0) + chapter('last', true, 0), cfg: { backToFirstWhenFinish: true } });
+  let clicks = 0; e.document.querySelector('#first .posCatalog_name').onclick = () => clicks++;
+  const task = e.start(); await e.clock.advance(13000); e.cfg.mode = 'manually';
+  await e.clock.advance(20000); await task;
+  assert.equal(clicks, 0); assert.equal(e.messages.some(message => message.type === 'error'), false);
+  assert.equal(e.clock.timers.size, 0);
+});
+test('the standalone reader respects disabled automatic reading', async t => {
+  let turns = 0;
+  const e = setup(t, { url: 'https://mooc1.chaoxing.com/readsvr/book/mooc', cfg: { enablePPT: false }, readerGlobals: { readweb: { goto: () => turns++ }, epage: 7 } });
+  await e.api.CXProject.scripts.study.onactive(); await e.clock.advance(10000);
+  assert.equal(turns, 0); assert.equal(e.clock.timers.size, 0);
+});
+test('leaving the standalone reader cancels its scheduled page turn', async t => {
+  let turns = 0;
+  const e = setup(t, { url: 'https://mooc1.chaoxing.com/readsvr/book/mooc', readerGlobals: { readweb: { goto: () => turns++ }, epage: 7 } });
+  await e.api.CXProject.scripts.study.onactive(); await e.clock.advance(1000);
+  e.window.dispatchEvent(new e.window.Event('pagehide')); await e.clock.advance(10000);
+  assert.equal(turns, 0); assert.equal(e.clock.timers.size, 0);
+});
+
+test('media execution ignores a hidden preview audio before the actual course player', async t => {
+  const e = setup(t, { attachments: [mediaAttachment('video')], cfg: { mode: 'manually' } });
+  const player = addMedia(e, 'video'), doc = player.frame.contentDocument;
+  const preview = doc.createElement('audio'); preview.id = 'auditionAudio'; preview.style.display = 'none';
+  let previewPlays = 0; preview.play = async () => { previewPlays++; }; preview.pause = () => {};
+  doc.body.prepend(preview);
+  const task = e.start(); await e.clock.advance(4000);
+  const observed = { previewPlays, coursePlays: player.calls, selectedCourseMedia: e.window.currentMedia === player.media };
+  Array.from(e.document.querySelectorAll('button')).find(el => el.textContent === '停止学习').click(); await e.clock.flush(); await task;
+  assert.deepEqual(observed, { previewPlays: 0, coursePlays: 1, selectedCourseMedia: true });
+  assert.equal(e.clock.timers.size, 0);
+});
+
+test('live volume and speed settings keep the course video in its iframe muted', async t => {
+  const e = setup(t, { attachments: [mediaAttachment('video')], cfg: { mode: 'manually', volume: '0.65' } });
+  const player = addMedia(e, 'video'), listeners = new Map(), script = e.api.CXProject.scripts.study;
+  script.onConfigChange = (key, callback) => listeners.set(key, callback);
+  const task = script.onactive(); await e.clock.advance(4000);
+  assert.equal(player.calls, 1); assert.equal(player.media.muted, true); assert.equal(player.media.volume, 0);
+  e.cfg.volume = '0.9'; player.media.muted = false; player.media.volume = 0.9;
+  listeners.get('volume')();
+  assert.equal(player.media.muted, true); assert.equal(player.media.volume, 0);
+  e.cfg.playbackRate = '1.5'; player.media.muted = false; player.media.volume = 0.9;
+  listeners.get('playbackRate')();
+  assert.equal(player.media.playbackRate, 1.5); assert.equal(player.media.muted, true); assert.equal(player.media.volume, 0);
+  Array.from(e.document.querySelectorAll('button')).find(el => el.textContent === '停止学习').click();
+  await e.clock.flush(); await task; assert.equal(e.clock.timers.size, 0);
 });

@@ -286,21 +286,72 @@ export function isStudyElementVisible(element: HTMLElement | null | undefined) {
 
 /** 空知识点不一定初始化 attachments；只接受可见的空内容提示，不能覆盖尚未加载的任务。 */
 export function isStudyContentEmpty(doc: Document) {
-	const body = doc.body;
-	if (!body || body.querySelector('iframe,video,audio,.ans-attach-ct,.ans-job-icon,.TiMu')) return false;
-	let empty = false;
-	const visibleText = (element: HTMLElement): string => {
-		if (element.matches('script,style,template,noscript,.study-controls') || element.hidden || !isStudyElementVisible(element)) return '';
-		let text = '';
-		for (const child of Array.from(element.childNodes)) {
-			if (child.nodeType === 3) text += child.textContent || '';
-			else if (child.nodeType === 1) text += visibleText(child as HTMLElement);
-		}
-		if (/^暂无内容[。.!！]?$/.test(text.replace(/\s+/g, ''))) empty = true;
-		return text;
+	const visited = new Set<Document>();
+	const hidden = (element: HTMLElement) => {
+		const style = element.ownerDocument.defaultView?.getComputedStyle(element);
+		return !element.isConnected || element.hidden || style?.display === 'none' ||
+			style?.visibility === 'hidden' || style?.visibility === 'collapse' ||
+			(!element.getClientRects().length && style?.display !== 'contents');
 	};
-	visibleText(body);
-	return empty;
+	const visibleInDocument = (element: HTMLElement) => {
+		for (let current: HTMLElement | null = element; current; current = current.parentElement) {
+			if (hidden(current)) return false;
+		}
+		return true;
+	};
+	const courseContent = (currentDoc: Document) => currentDoc.querySelector<HTMLElement>('#pageDiv.ans-cc') || currentDoc.querySelector<HTMLElement>('.ans-cc');
+	const taskDocuments = new Set<Document>();
+	const hasTasks = (currentDoc: Document): boolean => {
+		if (taskDocuments.has(currentDoc)) return false;
+		taskDocuments.add(currentDoc);
+		const attachments = (currentDoc.defaultView as (Window & { attachments?: unknown }) | null)?.attachments;
+		if (Array.isArray(attachments) && attachments.length) return true;
+		if (currentDoc.querySelector('.ans-attach-ct,.ans-job-icon,.TiMu,iframe[data]')) return true;
+		const content = courseContent(currentDoc);
+		// 空卡片外的隐藏试听播放器不是课程任务；卡片内媒体和显式任务标记仍阻止跳转。
+		if (Array.from(currentDoc.querySelectorAll<HTMLMediaElement>('video,audio')).some((media) =>
+			!content || content.contains(media) || visibleInDocument(media))) return true;
+		for (const frame of Array.from(currentDoc.querySelectorAll('iframe'))) {
+			try {
+				const nested = frame.contentWindow?.document;
+				if (nested && hasTasks(nested)) return true;
+			} catch { /* 可见跨域内容在下方按未知状态阻止跳转。 */ }
+		}
+		return false;
+	};
+	if (hasTasks(doc)) return false;
+	const inspect = (currentDoc: Document): boolean => {
+		const body = currentDoc.body;
+		if (!body || visited.has(currentDoc)) return false;
+		visited.add(currentDoc);
+		// 平台的空内容位于 pageDiv；工具面板或其他区域的提示不能充当课程内容。
+		const content = courseContent(currentDoc) || body;
+		if (!visibleInDocument(content)) return false;
+		let empty = false;
+		const visibleText = (element: HTMLElement): string => {
+			if (element.matches('script,style,template,noscript,.study-controls') || hidden(element)) return '';
+			let text = '';
+			for (const child of Array.from(element.childNodes)) {
+				if (child.nodeType === 3) text += child.textContent || '';
+				else if (child.nodeType === 1) text += visibleText(child as HTMLElement);
+			}
+			if (/^暂无内容[。.!！]?$/.test(text.replace(/\s+/g, ''))) empty = true;
+			return text;
+		};
+		visibleText(content);
+		for (const frame of Array.from(body.querySelectorAll('iframe'))) {
+			const style = currentDoc.defaultView?.getComputedStyle(frame);
+			// 隐藏辅助 frame 不代表任务；带任务标记的 frame 已在上方拦截。
+			if (!visibleInDocument(frame) || style?.width === '0px' || style?.height === '0px') continue;
+			try {
+				const nested = frame.contentWindow?.document;
+				if (!nested || !inspect(nested)) return false;
+				empty = true;
+			} catch { return false; }
+		}
+		return empty;
+	};
+	return inspect(doc);
 }
 
 export function studyReaderTiming(src: string, base: string) {

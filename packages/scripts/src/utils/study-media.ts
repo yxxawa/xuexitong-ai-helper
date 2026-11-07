@@ -1,5 +1,24 @@
 import { assertStudyActive, studyControl, studyPaused, studyStatus } from './study';
 
+function muteStudyVideo(media: HTMLMediaElement) {
+	// Course players can belong to a different iframe realm.
+	if (media.tagName.toLowerCase() !== 'video') return;
+	if (!media.muted) media.muted = true;
+	if (media.volume !== 0) media.volume = 0;
+}
+
+/** Use the same settings policy for playback and live configuration changes. */
+export function applyStudyMediaSettings(media: HTMLMediaElement, settings: { playbackRate: number; volume: number }) {
+	if (media.tagName.toLowerCase() === 'video') muteStudyVideo(media);
+	else {
+		// Range controls in existing installs store their value as a string.
+		const volume = Number(settings.volume);
+		media.volume = Number.isFinite(volume) ? Math.max(0, Math.min(1, volume)) : 0;
+	}
+	const { playbackRate } = settings;
+	media.playbackRate = Number.isFinite(playbackRate) && playbackRate > 0 ? playbackRate : 1;
+}
+
 /** Serialize playback, recover transient failures, and release every listener on exit. */
 export function runStudyMedia(media: HTMLMediaElement, options: {
 	signal?: AbortSignal;
@@ -25,15 +44,19 @@ export function runStudyMedia(media: HTMLMediaElement, options: {
 		const maxRecoveries = options.maxRecoveries ?? 2;
 		const view = media.ownerDocument.defaultView;
 		let unsubscribe: (() => void) | undefined;
+		const keepMuted = () => muteStudyVideo(media);
 		const detach = () => {
 			media.removeEventListener('pause', resume);
 			media.removeEventListener('ended', ended);
 			media.removeEventListener('error', failed);
+			media.removeEventListener('volumechange', keepMuted);
 		};
 		const attach = () => {
 			media.addEventListener('pause', resume);
 			media.addEventListener('ended', ended);
 			media.addEventListener('error', failed);
+			media.addEventListener('volumechange', keepMuted);
+			keepMuted();
 		};
 		const finish = (error?: unknown) => {
 			if (finished) return;
@@ -67,11 +90,7 @@ export function runStudyMedia(media: HTMLMediaElement, options: {
 			if (view?.navigator.onLine === false || code === 1 || code === 2) recover(`音视频加载失败（错误码 ${code}）`);
 			else finish(new Error(`音视频加载失败（错误码 ${code || '未知'}），请检查网络或手动播放。`));
 		};
-		const applySettings = () => {
-			const { playbackRate, volume } = options.settings();
-			media.volume = Number.isFinite(volume) ? Math.max(0, Math.min(1, volume)) : 0;
-			media.playbackRate = Number.isFinite(playbackRate) && playbackRate > 0 ? playbackRate : 1;
-		};
+		const applySettings = () => applyStudyMediaSettings(media, options.settings());
 		const start = async () => {
 			timer = undefined;
 			if (finished || busy || recoveryAt !== undefined || studyPaused(options.signal) || view?.navigator.onLine === false) return;

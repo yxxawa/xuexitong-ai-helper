@@ -16,9 +16,9 @@ function setup(t, html = '') {
   const globals = { ...env.globals, ...clock.globals(), AbortController };
   return { ...env, clock, globals, api: loadTS(STUDY, globals) };
 }
-function mediaSetup(t, options = {}) {
-  const e = setup(t, '<video></video>');
-  const media = e.document.querySelector('video');
+function mediaSetup(t, options = {}, tag = 'video') {
+  const e = setup(t, `<${tag}></${tag}>`);
+  const media = e.document.querySelector(tag);
   let paused = true, ended = false, calls = 0, stops = 0;
   Object.defineProperties(media, { paused: { get: () => paused }, ended: { get: () => ended } });
   media.currentTime = 57;
@@ -59,6 +59,82 @@ test('empty knowledge detection rejects hidden placeholders, task DOM and helper
     e.document.body.innerHTML = html;
     assert.equal(e.api.isStudyContentEmpty(e.document), false, html);
   }
+});
+const emptyCourseCard = require('node:fs').readFileSync(require('node:path').join(__dirname, 'fixtures/knowledge-empty.html'), 'utf8');
+test('the live empty course card ignores its hidden audition player outside the content', t => {
+  const e = setup(t, emptyCourseCard);
+  assert.equal(e.document.querySelector('#pageDiv').contains(e.document.querySelector('#auditionAudio')), false);
+  assert.equal(e.api.isStudyContentEmpty(e.document), true);
+});
+test('only hidden media outside an explicit course container can be treated as auxiliary', t => {
+  const e = setup(t);
+  for (const html of [
+    '<audio hidden></audio>',
+    '<video style="display:none"></video>',
+    '<section style="display:none"><audio controls src="preview.mp3"></audio></section>'
+  ]) {
+    e.document.body.innerHTML = emptyCourseCard + html;
+    assert.equal(e.api.isStudyContentEmpty(e.document), true, html);
+  }
+  for (const html of [
+    '<div class="ans-cc"><p>暂无内容</p><audio hidden></audio></div>',
+    '<div class="ans-cc"><p>暂无内容</p><video hidden></video></div>',
+    '<div class="ans-cc"><p>暂无内容</p><audio id="auditionAudio" hidden></audio></div>',
+    '<p>暂无内容</p><audio hidden></audio>',
+    emptyCourseCard + '<audio controls></audio>',
+    emptyCourseCard + '<div class="ans-attach-ct" hidden><audio></audio></div>'
+  ]) {
+    e.document.body.innerHTML = html;
+    assert.equal(e.api.isStudyContentEmpty(e.document), false, html);
+  }
+  e.document.body.innerHTML = emptyCourseCard;
+  e.window.attachments = [{ job: true, jobid: 'pending' }];
+  assert.equal(e.api.isStudyContentEmpty(e.document), false, 'task metadata still blocks navigation');
+});
+test('empty course cards are not blocked by hidden auxiliary frames', t => {
+  const e = setup(t);
+  for (const frame of ['<iframe hidden></iframe>', '<iframe style="display:none"></iframe>', '<iframe style="width:0;height:0;border:0"></iframe>', '<div hidden><iframe></iframe></div>']) {
+    e.document.body.innerHTML = emptyCourseCard + frame;
+    assert.equal(e.api.isStudyContentEmpty(e.document), true, frame);
+  }
+});
+test('empty notices outside the actual course card cannot override its loading state', t => {
+  const e = setup(t, '<aside><p>暂无内容</p></aside><div id="pageDiv" class="ans-cc">加载中</div>');
+  assert.equal(e.api.isStudyContentEmpty(e.document), false);
+});
+test('display-contents wrappers do not hide a visible empty course notice', t => {
+  const e = setup(t, emptyCourseCard);
+  const card = e.document.querySelector('#pageDiv'); card.style.display = 'contents'; card.getClientRects = () => [];
+  assert.equal(e.api.isStudyContentEmpty(e.document), true);
+});
+test('a visible nested content frame can explicitly declare an empty course card', t => {
+  const e = setup(t, '<iframe id="content"></iframe>');
+  const frame = e.document.querySelector('iframe');
+  frame.contentWindow.HTMLElement.prototype.getClientRects = e.window.HTMLElement.prototype.getClientRects;
+  frame.contentDocument.body.innerHTML = emptyCourseCard;
+  assert.equal(e.api.isStudyContentEmpty(e.document), true);
+  frame.contentWindow.attachments = [{ job: true, jobid: 'pending' }];
+  assert.equal(e.api.isStudyContentEmpty(e.document), false, 'nested pending metadata must block navigation');
+});
+test('hidden task frames and unknown visible frames still prevent empty-page navigation', t => {
+  const e = setup(t);
+  for (const frame of ['<iframe data="{&quot;jobid&quot;:&quot;pending&quot;}" hidden></iframe>', '<div class="ans-attach-ct" hidden><iframe></iframe></div>', '<iframe></iframe>']) {
+    e.document.body.innerHTML = emptyCourseCard + frame;
+    assert.equal(e.api.isStudyContentEmpty(e.document), false, frame);
+  }
+  const frame = e.document.querySelector('iframe');
+  Object.defineProperty(frame, 'contentWindow', { configurable: true, get() { throw new Error('cross origin'); } });
+  assert.equal(e.api.isStudyContentEmpty(e.document), false, 'cross-origin content remains unknown');
+  delete frame.contentWindow;
+});
+test('known tasks inside hidden frames are not mistaken for auxiliary frames', t => {
+  const e = setup(t, emptyCourseCard + '<iframe hidden></iframe>');
+  const frame = e.document.querySelector('iframe');
+  frame.contentWindow.attachments = [{ job: true, jobid: 'pending' }];
+  assert.equal(e.api.isStudyContentEmpty(e.document), false);
+  delete frame.contentWindow.attachments;
+  frame.contentDocument.body.innerHTML = '<div class="ans-attach-ct"><iframe></iframe></div>';
+  assert.equal(e.api.isStudyContentEmpty(e.document), false);
 });
 test('media filtering checks all players rather than getting stuck on the first unmatched element', async t => {
   const e = setup(t, '<video id="advert"></video><audio id="task"></audio>');
@@ -130,7 +206,7 @@ test('playback preserves resume time, serializes repeated pause events and uses 
   assert.equal(e.calls, 1); assert.equal(e.media.currentTime, 57); assert.equal(e.media.playbackRate, 1.5);
   e.settings.playbackRate = 1; e.settings.volume = 0.7;
   e.pause(); e.pause(); e.pause(); await e.clock.advance(300);
-  assert.equal(e.calls, 2); assert.equal(e.media.playbackRate, 1); assert.equal(e.media.volume, 0.7);
+  assert.equal(e.calls, 2); assert.equal(e.media.playbackRate, 1); assert.equal(e.media.volume, 0); assert.equal(e.media.muted, true);
   e.end(); await e.task.promise; assert.equal(e.task.error, undefined); assert.equal(e.clock.timers.size, 0);
 });
 test('an interrupted play request retries even without a pause event and preserves the resume position', async t => {
@@ -254,7 +330,9 @@ test('pausing study immediately pauses playback and freezes the stall deadline u
   await e.clock.advance(1200); assert.equal(e.calls, 1);
   e.controller.pause(); assert.equal(e.media.paused, true);
   await e.clock.advance(6000); assert.equal(e.calls, 1); assert.equal(e.task.done, false);
+  e.settings.volume = 0.8; e.media.muted = false; e.media.volume = 0.8;
   e.controller.resume(); await e.clock.advance(300); assert.equal(e.calls, 2);
+  assert.equal(e.media.muted, true); assert.equal(e.media.volume, 0);
   e.controller.stop(); await e.task.promise;
   assert.ok(e.task.error); assert.equal(e.clock.timers.size, 0);
 });
@@ -292,6 +370,9 @@ test('replacement media is rebound and late events from the old element cannot f
   replacement.play = async () => { plays++; paused = false; }; replacement.pause = () => { paused = true; };
   e.media.replaceWith(replacement); await e.clock.advance(4500);
   assert.equal(bound, replacement); assert.equal(plays, 1); assert.equal(replacement.currentTime, 57);
+  assert.equal(replacement.muted, true); assert.equal(replacement.volume, 0);
+  e.media.muted = false; e.media.volume = 0.6; e.media.dispatchEvent(new e.window.Event('volumechange'));
+  assert.equal(e.media.muted, false); assert.equal(e.media.volume, 0.6);
   e.media.dispatchEvent(new e.window.Event('ended')); assert.equal(e.task.done, false);
   replacement.dispatchEvent(new e.window.Event('ended')); await e.task.promise; assert.equal(e.clock.timers.size, 0);
 });
@@ -327,6 +408,7 @@ test('offline source failures are retried after reconnection even when the brows
   assert.equal(e.task.done,false); assert.equal(loads,0); assert.equal(e.calls,1);
   online = true; await e.clock.advance(4000);
   assert.equal(loads,1); assert.equal(e.media.currentTime,57); assert.equal(e.media.paused,false);
+  assert.equal(e.media.muted,true); assert.equal(e.media.volume,0);
   e.end(); await e.task.promise; assert.equal(e.clock.timers.size,0);
 });
 test('starting offline waits for connectivity before making a playback request', async t => {
@@ -335,4 +417,36 @@ test('starting offline waits for connectivity before making a playback request',
   await e.clock.advance(4000); assert.equal(e.calls,0); assert.equal(e.task.done,false);
   online=true; await e.clock.advance(1500); assert.equal(e.calls,1);
   e.end(); await e.task.promise; assert.equal(e.clock.timers.size,0);
+});
+
+test('video is muted before playback and stays muted with saved slider values on resume', async t => {
+  const e = mediaSetup(t), play = e.media.play, starts = [];
+  e.media.play = async () => { starts.push([e.media.muted, e.media.volume]); await play(); };
+  e.settings.volume = '0.65';
+  await e.clock.advance(300);
+  assert.equal(e.media.muted, true); assert.equal(e.media.volume, 0);
+  e.settings.volume = '0.35'; e.media.muted = false; e.media.volume = 0.35;
+  e.pause(); await e.clock.advance(300);
+  assert.equal(e.media.muted, true); assert.equal(e.media.volume, 0);
+  e.controller.abort(); await e.task.promise;
+  assert.deepEqual(starts, [[true, 0], [true, 0]]); assert.equal(e.clock.timers.size, 0);
+});
+test('video sound changes are muted while running and the volume listener is removed on stop', async t => {
+  const e = mediaSetup(t); await e.clock.advance(300);
+  e.media.muted = false; e.media.volume = 0.9;
+  e.media.dispatchEvent(new e.window.Event('volumechange'));
+  assert.equal(e.media.muted, true); assert.equal(e.media.volume, 0);
+  e.controller.abort(); await e.task.promise;
+  e.media.muted = false; e.media.volume = 0.8;
+  e.media.dispatchEvent(new e.window.Event('volumechange'));
+  assert.equal(e.media.muted, false); assert.equal(e.media.volume, 0.8);
+  assert.equal(e.clock.timers.size, 0);
+});
+test('audio-only lessons retain the configured volume through automatic resume', async t => {
+  const e = mediaSetup(t, {}, 'audio');
+  e.settings.volume = '0.65'; await e.clock.advance(300);
+  assert.equal(e.media.volume, 0.65); assert.equal(e.media.muted, false);
+  e.settings.volume = '0.35'; e.pause(); await e.clock.advance(300);
+  assert.equal(e.media.volume, 0.35); assert.equal(e.media.muted, false);
+  e.end(); await e.task.promise; assert.equal(e.clock.timers.size, 0);
 });

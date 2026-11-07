@@ -17,7 +17,7 @@ export const playbackRate: Config = {
 
 /** 音量调节配置  */
 export const volume: Config<any, number> = {
-	label: '音量调节',
+	label: '音频音量（视频固定静音）',
 	attrs: { type: 'range', step: '0.05', min: '0', max: '1' },
 	defaultValue: 0,
 	onload() {

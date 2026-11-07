@@ -72,6 +72,68 @@ test('actual chapter runner executes two distinct job IDs even with the same mid
   assert.deepEqual(calls, ['first', 'second']); assert.equal(e.jumps.length, 0);
   assert.equal(e.messages.some(message => message.type === 'error'), false); assert.equal(e.clock.timers.size, 0);
 });
+const emptyKnowledge = '<div class="ans-cc"><p>暂无内容</p></div>';
+for (const mode of ['next', 'job']) test(`an explicitly empty knowledge tab without metadata advances in ${mode} mode`, async t => {
+  const html = chapterParams + chapter('last', true, 1) + '<ul class="prev_ul"><li class="active">知识点</li><li>视频</li></ul>' + emptyKnowledge;
+  const e = setup(t, { html, loading: true, cfg: { mode } }), task = e.start();
+  await e.clock.advance(40000); await task;
+  assert.equal(e.jumps.length, 1); assert.equal(e.alerts.length, 0);
+  assert.equal(e.messages.some(message => message.type === 'error'), false); assert.equal(e.clock.timers.size, 0);
+});
+test('an empty knowledge tab respects manual navigation mode', async t => {
+  const e = setup(t, { html: emptyKnowledge, loading: true, cfg: { mode: 'manually' } }), task = e.start();
+  await e.clock.advance(40000); await task;
+  assert.equal(e.jumps.length, 0); assert.equal(e.messages.some(message => message.type === 'error'), false);
+  assert.equal(e.clock.timers.size, 0);
+});
+test('a late empty placeholder is given its own settling window before navigation', async t => {
+  const e = setup(t, { html: chapterParams, loading: true }), task = e.start();
+  await e.clock.advance(12000); assert.equal(e.jumps.length, 0);
+  e.document.body.insertAdjacentHTML('beforeend', emptyKnowledge);
+  await e.clock.advance(6000); assert.equal(e.jumps.length, 0);
+  await e.clock.advance(22000); await task;
+  assert.equal(e.jumps.length, 1); assert.equal(e.messages.some(message => message.type === 'error'), false);
+  assert.equal(e.clock.timers.size, 0);
+});
+test('an empty placeholder cannot override a known required task', async t => {
+  const e = setup(t, { html: chapterParams + emptyKnowledge, attachments: [attachment('pending')] }), task = e.start();
+  await e.clock.advance(40000); await task;
+  assert.equal(e.jumps.length, 0); assert.match(e.messages.find(message => message.type === 'error').content, /1 个任务/);
+  assert.equal(e.clock.timers.size, 0);
+});
+for (const html of ['<p hidden>暂无内容</p>', '<iframe></iframe>' + emptyKnowledge, '<p>该知识点暂无内容时请联系老师</p>']) {
+  test(`hidden, contextual or sibling empty text does not prove a chapter is empty: ${html}`, async t => {
+    const e = setup(t, { html: chapterParams + html, loading: true }), task = e.start();
+    await e.clock.advance(40000); await task;
+    assert.equal(e.jumps.length, 0); assert.match(e.messages.find(message => message.type === 'error').content, /任务列表加载超时/);
+    assert.equal(e.clock.timers.size, 0);
+  });
+}
+test('a placeholder replaced by real task metadata during settling still executes the task', async t => {
+  const e = setup(t, { html: chapterParams + emptyKnowledge, loading: true }); let calls = 0;
+  const task = e.start(); await e.clock.advance(4000);
+  e.document.querySelector('.ans-cc').remove();
+  e.window.attachments = [attachment('late')]; e.addRead('late', () => calls++);
+  await e.clock.advance(20000); await task;
+  assert.equal(calls, 1); assert.equal(e.jumps.length, 1);
+  assert.equal(e.messages.some(message => message.type === 'error'), false); assert.equal(e.clock.timers.size, 0);
+});
+test('an empty placeholder disappearing during the jump countdown returns to loading instead of navigating', async t => {
+  const e = setup(t, { html: chapterParams + emptyKnowledge, loading: true }), task = e.start();
+  await e.clock.advance(7000); e.document.querySelector('.ans-cc').remove();
+  await e.clock.advance(40000); await task;
+  assert.equal(e.jumps.length, 0); assert.match(e.messages.find(message => message.type === 'error').content, /任务列表加载超时/);
+  assert.equal(e.clock.timers.size, 0);
+});
+test('a task arriving during the empty-page countdown runs before navigation', async t => {
+  const e = setup(t, { html: chapterParams + emptyKnowledge, loading: true }); let calls = 0;
+  const task = e.start(); await e.clock.advance(7000);
+  e.document.querySelector('.ans-cc').remove();
+  e.window.attachments = [attachment('late')]; e.addRead('late', () => calls++);
+  await e.clock.advance(20000); await task;
+  assert.equal(calls, 1); assert.equal(e.jumps.length, 1);
+  assert.equal(e.messages.some(message => message.type === 'error'), false); assert.equal(e.clock.timers.size, 0);
+});
 test('late metadata and an iframe mounted after twelve seconds are handled by the actual chapter runner', async t => {
   const e = setup(t, { loading: true, cfg: { mode: 'manually' } }); let calls = 0;
   const task = e.start(); await e.clock.advance(12000);

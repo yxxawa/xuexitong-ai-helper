@@ -38,7 +38,7 @@ import Typr from 'typr.js';
 import { CommonWorkOptions, playMedia } from '../utils';
 import {
 	waitForElement, waitForMedia, assertStudyActive, studySleep, studyJobId, findStudyAttachment,
-	searchStudyFrames, runStudyJobs, isStudyElementVisible, studyReaderTiming
+	searchStudyFrames, runStudyJobs, isStudyElementVisible, isStudyContentEmpty, studyReaderTiming
 } from '../utils/study';
 import { runStudyMedia } from '../utils/study-media';
 import { StudyControl, studyControl, studyPaused, studyCheckpoint, studyStatus, studyTaskComplete, studyChapterRemaining, waitForStudyCompletion } from '../utils/study';
@@ -1531,7 +1531,8 @@ export function study(opts: StudyOptions): Promise<void> {
 async function studyChapter(opts: StudyOptions, signal: AbortSignal) {
 	await studySleep(3000, signal);
 	const searchedJobs: Job[] = [];
-	await runStudyJobs({
+	let emptyContent = false;
+	const runJobs = () => runStudyJobs({
 		signal,
 		discover: () => searchJob(opts, searchedJobs, signal),
 		snapshot: () => {
@@ -1549,9 +1550,12 @@ async function studyChapter(opts: StudyOptions, signal: AbortSignal) {
 					CommonProject.scripts.settings.cfg['work-when-no-job']) || (opts.enableMedia && ['insertvideo', 'insertaudio'].includes(module) &&
 					(attachment.isPassed ? opts.restudy : opts.forceLearn));
 			}).map((attachment) => studyJobId(attachment) || '未识别的任务');
-			return { ready: !!attachments, signature: JSON.stringify(attachments || null), pending };
+			const empty = emptyContent = !attachments && isStudyContentEmpty(document);
+			if (!attachments) studyStatus(signal, 'waiting', empty ? '当前知识点暂无内容，等待页面稳定' : '等待课程任务加载');
+			return { ready: !!attachments || empty, signature: JSON.stringify({ attachments: attachments || null, empty }), pending };
 		}
 	});
+	await runJobs();
 	await studyCheckpoint(signal);
 
 	// @ts-ignore
@@ -1644,11 +1648,16 @@ async function studyChapter(opts: StudyOptions, signal: AbortSignal) {
 	};
 
 	if (CXProject.scripts.study.cfg.mode !== 'manually') {
-		studyStatus(signal, 'waiting', '当前任务已处理，5 秒后切换章节');
-		const msg = '当前页面可执行任务处理结束，即将跳转；完成状态以平台记录为准。';
-		$message.success({ content: msg });
-		console.info(msg);
-		await studySleep(5000, signal);
+		while (true) {
+			studyStatus(signal, 'waiting', '当前任务已处理，5 秒后切换章节');
+			const msg = '当前页面可执行任务处理结束，即将跳转；完成状态以平台记录为准。';
+			$message.success({ content: msg });
+			console.info(msg);
+			await studySleep(5000, signal);
+			// 空内容提示可能被异步加载的任务替换，跳转前再次确认。
+			if (!emptyContent || (!Array.isArray($gm.unsafeWindow.attachments) && isStudyContentEmpty(document))) break;
+			await runJobs();
+		}
 		await next();
 	} else {
 		const msg = '当前页面可执行任务处理结束，自动跳转已关闭，请核对平台记录后手动跳转。';

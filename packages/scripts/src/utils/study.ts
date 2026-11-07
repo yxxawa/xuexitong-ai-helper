@@ -284,6 +284,25 @@ export function isStudyElementVisible(element: HTMLElement | null | undefined) {
 	return style?.display !== 'none' && style?.visibility !== 'hidden' && style?.visibility !== 'collapse';
 }
 
+/** 空知识点不一定初始化 attachments；只接受可见的空内容提示，不能覆盖尚未加载的任务。 */
+export function isStudyContentEmpty(doc: Document) {
+	const body = doc.body;
+	if (!body || body.querySelector('iframe,video,audio,.ans-attach-ct,.ans-job-icon,.TiMu')) return false;
+	let empty = false;
+	const visibleText = (element: HTMLElement): string => {
+		if (element.matches('script,style,template,noscript,.study-controls') || element.hidden || !isStudyElementVisible(element)) return '';
+		let text = '';
+		for (const child of Array.from(element.childNodes)) {
+			if (child.nodeType === 3) text += child.textContent || '';
+			else if (child.nodeType === 1) text += visibleText(child as HTMLElement);
+		}
+		if (/^暂无内容[。.!！]?$/.test(text.replace(/\s+/g, ''))) empty = true;
+		return text;
+	};
+	visibleText(body);
+	return empty;
+}
+
 export function studyReaderTiming(src: string, base: string) {
 	const value = Number(new URL(src || '.', base).searchParams.get('timing') || 60);
 	return Number.isFinite(value) && value > 0 ? Math.ceil(value) : 60;

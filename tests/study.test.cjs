@@ -33,6 +33,33 @@ function mediaSetup(t, options = {}) {
     pause() { paused = true; media.dispatchEvent(new e.window.Event('pause')); },
     end() { ended = true; media.dispatchEvent(new e.window.Event('ended')); } };
 }
+test('empty knowledge detection accepts a visible placeholder with whitespace or nested markup', t => {
+  const e = setup(t, '<section><p> 暂无 <span>内容</span>！ </p></section>');
+  assert.equal(e.api.isStudyContentEmpty(e.document), true);
+});
+test('empty knowledge detection rejects hidden placeholders, task DOM and helper UI messages', t => {
+  const e = setup(t);
+  const fixtures = [
+    '<section hidden><p>暂无内容</p></section>',
+    '<div><p hidden>暂无内容</p></div>',
+    '<p>暂无<span hidden>内容</span></p>',
+    '<div><script type="text/plain">暂无内容</script></div>',
+    '<section><div class="study-controls"><p>暂无内容</p></div></section>',
+    '<style>.empty {display:none}</style><section class="empty"><p>暂无内容</p></section>',
+    '<p style="visibility:hidden">暂无内容</p>',
+    '<script type="text/plain">暂无内容</script>',
+    '<div class="study-controls"><p>暂无内容</p></div>',
+    '<div class="ans-attach-ct"></div><p>暂无内容</p>',
+    '<div class="ans-job-icon"></div><p>暂无内容</p>',
+    '<video></video><p>暂无内容</p>',
+    '<audio></audio><p>暂无内容</p>',
+    '<div class="TiMu"><p>暂无内容</p></div>'
+  ];
+  for (const html of fixtures) {
+    e.document.body.innerHTML = html;
+    assert.equal(e.api.isStudyContentEmpty(e.document), false, html);
+  }
+});
 test('media filtering checks all players rather than getting stuck on the first unmatched element', async t => {
   const e = setup(t, '<video id="advert"></video><audio id="task"></audio>');
   const media = await e.api.waitForMedia({ filter: media => media.id === 'task' });
